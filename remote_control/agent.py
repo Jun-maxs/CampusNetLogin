@@ -826,28 +826,12 @@ class Agent:
                 message = "强制离线锁已解除"
 
             elif command == "login_now":
-                # 立即登录 (本地执行，不需要网络到服务器)
-                if self.net.username and self.net.password:
-                    r = self.net.login(self.net.username, self.net.password)
-                    success = r.get("result") == "success"
-                    message = r.get("message", "已登录" if success else "登录失败")
-                else:
-                    message = "无保存的账号密码"
+                success = False
+                message = "远程上线登录功能已禁用"
                 
             elif command == "login":
-                self.force_offline = False  # 登录指令自动解除强制离线
-                username = params.get("username", self.net.username)
-                password = params.get("password", self.net.password)
-                if not username or not password:
-                    message = "无账号密码，无法登录"
-                else:
-                    r = self.net.login(username, password, params.get("service", ""))
-                    success = r.get("result") == "success"
-                    message = r.get("message", "已登录" if success else "登录失败")
-                    if success:
-                        self.net.username = username
-                        self.net.password = password
-                        self._save_credentials()
+                success = False
+                message = "远程上线登录功能已禁用"
                         
             elif command == "refresh":
                 online, ip, ui, msg = self.net.check_online()
@@ -855,11 +839,8 @@ class Agent:
                 message = f"{'在线' if online else '离线'} - {ip} - {msg}"
                 
             elif command == "set_credentials":
-                self.net.username = params.get("username", "")
-                self.net.password = params.get("password", "")
-                self._save_credentials()
-                success = True
-                message = f"已设置凭据: {self.net.username}"
+                success = False
+                message = "远程设置凭据功能已禁用"
 
             elif command == "enable_autostart":
                 success, message = enable_autostart()
