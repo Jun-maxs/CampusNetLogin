@@ -4,10 +4,29 @@
 功能: 查看所有 Agent 状态、远程下线/登录、查看 token
       持久化存储: 历史 Agent、命令记录均保存到磁盘
 """
-import json, time, uuid, os, threading
+import json, time, uuid, os, threading, hashlib
 from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
+
+# API 鉴权密钥 (必须与 Agent 一致)
+API_SECRET = "CampusNet@2026#Secure"
+AUTH_TOLERANCE = 300  # 时间戳容差(秒)
+
+def _verify_auth():
+    """验证 Agent API 请求签名"""
+    ts = request.headers.get("X-Auth-Ts", "")
+    sig = request.headers.get("X-Auth-Sig", "")
+    if not ts or not sig:
+        return False
+    try:
+        if abs(time.time() - int(ts)) > AUTH_TOLERANCE:
+            return False
+    except:
+        return False
+    body = request.get_data(as_text=True)
+    expected = hashlib.sha256(f"{API_SECRET}:{ts}:{body[:64]}".encode()).hexdigest()[:16]
+    return sig == expected
 
 # ============ 持久化存储 ============
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -66,6 +85,8 @@ def _add_history(agent_id, action, detail="", success=None):
 @app.route("/api/heartbeat", methods=["POST"])
 def heartbeat():
     """Agent 定时心跳上报"""
+    if not _verify_auth():
+        return jsonify({"error": "auth failed"}), 403
     data = request.json or {}
     aid = data.get("agent_id")
     if not aid:
@@ -85,6 +106,8 @@ def heartbeat():
 @app.route("/api/report", methods=["POST"])
 def report():
     """Agent 回报命令执行结果"""
+    if not _verify_auth():
+        return jsonify({"error": "auth failed"}), 403
     data = request.json or {}
     cid = data.get("cmd_id")
     aid = data.get("agent_id", "")
@@ -313,15 +336,40 @@ function closeModal(){
   document.getElementById("confirmModal").className="modal-overlay";
   pendingAction=null;
 }
+async function setReconnect(agentId,delay){
+  await sendCmd(agentId,'set_reconnect',{delay:parseInt(delay)});
+}
+
+function forceOffline(agentId,hostname){
+  pendingAction={agentId,action:'logout'};
+  document.getElementById("modalTitle").textContent="强制下线";
+  document.getElementById("modalMsg").innerHTML=
+    `设备: <b>${hostname}</b><br><br>`+
+    `<label style="font-size:13px">离线持续时间:</label><br>`+
+    `<select id="offlineDuration" style="padding:6px 12px;border-radius:8px;border:1px solid #e5e7eb;font-size:13px;margin-top:6px;width:100%">`+
+    `<option value="0">永久 (手动解锁)</option>`+
+    `<option value="15">15秒</option>`+
+    `<option value="30">30秒</option>`+
+    `<option value="60">1分钟</option>`+
+    `<option value="300" selected>5分钟</option>`+
+    `<option value="600">10分钟</option>`+
+    `<option value="1800">30分钟</option>`+
+    `<option value="3600">1小时</option>`+
+    `<option value="7200">2小时</option>`+
+    `<option value="86400">24小时</option>`+
+    `</select>`;
+  document.getElementById("confirmModal").className="modal-overlay show";
+}
 async function confirmAction(){
   if(!pendingAction)return;
   const{agentId,action}=pendingAction;
+  let params={};
+  if(action==='logout'){
+    const sel=document.getElementById("offlineDuration");
+    if(sel)params.duration=parseInt(sel.value);
+  }
   closeModal();
-  await sendCmd(agentId,action);
-}
-
-async function setReconnect(agentId,delay){
-  await sendCmd(agentId,'set_reconnect',{delay:parseInt(delay)});
+  await sendCmd(agentId,action,params);
 }
 
 async function sendCmd(agentId, cmd, params={}){
@@ -377,7 +425,7 @@ async function refresh(){
         <div class="info-row"><span class="k">校园网 IP</span><span class="v">${a.campus_ip||"--"}</span></div>
         <div class="info-row"><span class="k">MAC</span><span class="v">${a.mac||"--"}</span></div>
         <div class="info-row"><span class="k">用户名</span><span class="v">${a.username||"--"}</span></div>
-        <div class="info-row"><span class="k">网络状态</span><span class="v">${a.force_offline?"🔒 强制离线中":a.net_online?"✅ 已认证":"❌ 未认证"}</span></div>
+        <div class="info-row"><span class="k">网络状态</span><span class="v">${a.force_offline?"🔒 "+(a.net_message||"强制离线中"):a.net_online?"✅ 已认证":"❌ 未认证"}</span></div>
         <div class="info-row"><span class="k">最后心跳</span><span class="v">${ago(a.last_seen)}</span></div>
         <div class="info-row"><span class="k">运行时间</span><span class="v">${a.uptime||"--"}</span></div>
         <div class="info-row"><span class="k">自动重连</span><span class="v">${a.reconnect_status||"禁用"}</span></div>
@@ -389,7 +437,7 @@ async function refresh(){
           </label>
         </div>
         <div class="actions">
-          <button class="btn btn-red" onclick="sendCmd('${a.agent_id}','logout')">⏏ 强制下线</button>
+          <button class="btn btn-red" onclick="forceOffline('${a.agent_id}','${a.hostname||a.agent_id}')">⏏ 强制下线</button>
           <button class="btn btn-green" onclick="sendCmd('${a.agent_id}','unlock')">🔓 解除锁定</button>
           <button class="btn btn-blue" onclick="sendCmd('${a.agent_id}','refresh')">🔄 刷新</button>
           <button class="btn btn-orange" onclick="sendCmd('${a.agent_id}','cancel_mab')">🚫 取消无感</button>

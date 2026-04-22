@@ -4,12 +4,16 @@
 功能: 自动上报状态、接收远程命令(下线/登录/刷新)
 安装后自动运行，保持与控制面板的连接
 """
-import json, time, os, sys, socket, uuid, hashlib, platform, traceback
+import json, time, os, sys, socket, uuid, hashlib, platform, traceback, base64
 import urllib.request, urllib.parse, urllib.error
 
 # ============ 配置 ============
-DEFAULT_SERVER = "https://yuanai.best/gyk"  # 控制面板地址
+# 服务器地址 (base64 混淆, 不以明文出现在二进制中)
+_S = b'aHR0cHM6Ly95dWFuYWkuYmVzdC9neWs='  # https://yuanai.best/gyk
+DEFAULT_SERVER = base64.b64decode(_S).decode()
 PORTAL_IP = "10.228.9.7"
+# API 鉴权密钥 (服务器和客户端必须一致)
+API_SECRET = "CampusNet@2026#Secure"
 HEARTBEAT_INTERVAL = 5  # 心跳间隔(秒)
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_config.json")
 AGENT_SCRIPT = os.path.abspath(__file__)
@@ -41,11 +45,20 @@ def get_agent_id():
     mac = get_mac()
     return hashlib.md5(f"{hostname}-{mac}".encode()).hexdigest()[:12]
 
+def _sign(data_str):
+    """生成 API 签名"""
+    ts = str(int(time.time()))
+    sig = hashlib.sha256(f"{API_SECRET}:{ts}:{data_str[:64]}".encode()).hexdigest()[:16]
+    return ts, sig
+
 def http_post(url, data, timeout=8):
-    """发送 POST 请求 (仅用 urllib, 无需 requests)"""
+    """发送 POST 请求 (带 API 签名鉴权)"""
     body = json.dumps(data).encode("utf-8")
+    ts, sig = _sign(body.decode())
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
+    req.add_header("X-Auth-Ts", ts)
+    req.add_header("X-Auth-Sig", sig)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -576,6 +589,7 @@ class Agent:
         self.reconnect_at = 0      # 计划重连的时间戳
         self.was_online = False     # 上一次检测是否在线
         self.force_offline = False  # 强制离线锁: True时持续执行下线
+        self.force_offline_until = 0   # 强制离线到期时间戳 (0=永久直到手动解锁)
 
     def get_uptime(self):
         s = int(time.time() - self.start_time)
@@ -585,7 +599,15 @@ class Agent:
 
     def _enforce_offline(self, online):
         """强制离线: 检测到又被无感认证自动连上时, 立刻再次下线"""
-        if not self.force_offline or not online:
+        if not self.force_offline:
+            return
+        # 检查定时解锁
+        if self.force_offline_until > 0 and time.time() >= self.force_offline_until:
+            self.force_offline = False
+            self.force_offline_until = 0
+            print("  [强制离线] 定时到期，自动解锁")
+            return
+        if not online:
             return
         print("  [强制离线] 检测到被自动重连, 执行下线...")
         self.net.cancel_mab()
@@ -603,7 +625,11 @@ class Agent:
         self._enforce_offline(online)
         if self.force_offline and online:
             online = False
-            msg = "强制离线中"
+            if self.force_offline_until > 0:
+                left = int(self.force_offline_until - time.time())
+                msg = f"强制离线中({left}秒后解锁)"
+            else:
+                msg = "强制离线中(永久)"
         
         # 自动重连状态描述
         rc_status = "禁用"
@@ -632,6 +658,7 @@ class Agent:
             "reconnect_delay": self.reconnect_delay,
             "reconnect_status": rc_status,
             "force_offline": self.force_offline,
+            "force_offline_until": self.force_offline_until,
             "version": "1.0",
         }
 
@@ -664,7 +691,13 @@ class Agent:
                 # 启用强制离线锁, 防止无感认证自动重连
                 self.force_offline = True
                 self.reconnect_at = 0
-                message += " | 强制离线锁已启用(发送unlock解锁)"
+                duration = int(params.get("duration", 0))  # 0=永久
+                if duration > 0:
+                    self.force_offline_until = time.time() + duration
+                    message += f" | 强制离线 {duration}秒"
+                else:
+                    self.force_offline_until = 0
+                    message += " | 强制离线(永久,发送unlock解锁)"
 
             elif command == "cancel_mab":
                 r1 = self.net.cancel_mab()
