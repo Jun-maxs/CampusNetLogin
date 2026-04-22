@@ -142,6 +142,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .log-box .ok{color:#059669}
 .log-box .err{color:#dc2626}
 .empty{text-align:center;color:var(--sub);padding:60px 20px;font-size:14px}
+.autostart-row{display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding:10px 12px;background:#f8fafc;border-radius:8px;border:1px solid var(--border)}
+.autostart-row .label{font-size:13px;color:var(--text);font-weight:500}
+.toggle{position:relative;width:44px;height:24px;cursor:pointer}
+.toggle input{opacity:0;width:0;height:0}
+.toggle .slider{position:absolute;top:0;left:0;right:0;bottom:0;background:#ccc;border-radius:24px;transition:.3s}
+.toggle .slider::before{content:"";position:absolute;width:18px;height:18px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s}
+.toggle input:checked+.slider{background:var(--green)}
+.toggle input:checked+.slider::before{transform:translateX(20px)}
+.modal-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:1000;align-items:center;justify-content:center}
+.modal-overlay.show{display:flex}
+.modal{background:#fff;border-radius:16px;padding:28px;max-width:380px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.modal h3{font-size:18px;margin-bottom:8px}
+.modal p{font-size:13px;color:var(--sub);margin-bottom:20px;line-height:1.6}
+.modal .warn{color:var(--orange);font-weight:600;font-size:14px}
+.modal-btns{display:flex;gap:12px;justify-content:center}
+.modal-btns .btn{padding:10px 24px;font-size:14px}
 @media(max-width:600px){.agent-grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
@@ -170,7 +186,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     </div>
   </div>
 
-  <div class="section">
+  <div class="modal-overlay" id="confirmModal">
+  <div class="modal">
+    <h3 id="modalTitle">确认操作</h3>
+    <p id="modalMsg"></p>
+    <p class="warn">❗ 请再次确认执行此操作</p>
+    <div class="modal-btns">
+      <button class="btn btn-red" onclick="confirmAction()">确认执行</button>
+      <button class="btn btn-blue" onclick="closeModal()">取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="section">
     <h2>📋 操作日志</h2>
     <div class="log-box" id="logBox"><div style="color:#9ca3af">等待操作...</div></div>
   </div>
@@ -197,6 +225,29 @@ function ago(t){
 function toggleToken(id){
   const el=document.getElementById("tok-"+id);
   el.style.display=el.style.display==="block"?"none":"block";
+}
+
+let pendingAction=null;
+function toggleAutostart(agentId, hostname, currentState){
+  const action=currentState?"disable_autostart":"enable_autostart";
+  const actionText=currentState?"禁用开机自启":"启用开机自启";
+  pendingAction={agentId,action};
+  document.getElementById("modalTitle").textContent=actionText;
+  document.getElementById("modalMsg").innerHTML=
+    `设备: <b>${hostname}</b><br>` +
+    `操作: <b>${actionText}</b><br><br>` +
+    `这将${currentState?"删除该设备的开机自动运行配置":"在该设备上设置开机后自动启动 Agent"}`;
+  document.getElementById("confirmModal").className="modal-overlay show";
+}
+function closeModal(){
+  document.getElementById("confirmModal").className="modal-overlay";
+  pendingAction=null;
+}
+async function confirmAction(){
+  if(!pendingAction)return;
+  const{agentId,action}=pendingAction;
+  closeModal();
+  await sendCmd(agentId,action);
 }
 
 async function sendCmd(agentId, cmd, params={}){
@@ -260,6 +311,13 @@ async function refresh(){
         <div class="info-row"><span class="k">网络状态</span><span class="v">${a.net_online?"✅ 已认证":"❌ 未认证"}</span></div>
         <div class="info-row"><span class="k">最后心跳</span><span class="v">${ago(a.last_seen)}</span></div>
         <div class="info-row"><span class="k">运行时间</span><span class="v">${a.uptime||"--"}</span></div>
+        <div class="autostart-row">
+          <span class="label">🚀 开机自启</span>
+          <label class="toggle" onclick="toggleAutostart('${a.agent_id}','${a.hostname||a.agent_id}',${!!a.autostart})">
+            <input type="checkbox" ${a.autostart?"checked":""} onclick="event.preventDefault()">
+            <span class="slider"></span>
+          </label>
+        </div>
         <div class="actions">
           <button class="btn btn-red" onclick="sendCmd('${a.agent_id}','logout')">⏏ 下线</button>
           <button class="btn btn-green" onclick="sendCmd('${a.agent_id}','login')">🔌 上线</button>

@@ -3,6 +3,7 @@ __pycache__/
 *.pyo
 .env
 agent_config.json
+start_agent.vbs
 mobile_config.json
 *.log
 .idea/

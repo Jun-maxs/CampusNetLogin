@@ -12,6 +12,9 @@ DEFAULT_SERVER = "http://localhost:9090"  # 控制面板地址
 PORTAL_IP = "10.228.9.7"
 HEARTBEAT_INTERVAL = 5  # 心跳间隔(秒)
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_config.json")
+AGENT_SCRIPT = os.path.abspath(__file__)
+REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+REG_NAME = "CampusNetAgent"
 
 # ============ 工具函数 ============
 
@@ -56,6 +59,65 @@ def http_get(url, timeout=8):
             return resp.read().decode("utf-8")
     except:
         return None
+
+# ============ 开机自启管理 (Windows) ============
+
+def is_autostart_enabled():
+    """检查是否已设置开机自启"""
+    if platform.system() != "Windows":
+        return False
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_READ)
+        try:
+            val, _ = winreg.QueryValueEx(key, REG_NAME)
+            winreg.CloseKey(key)
+            return bool(val)
+        except FileNotFoundError:
+            winreg.CloseKey(key)
+            return False
+    except Exception:
+        return False
+
+def enable_autostart():
+    """启用开机自启 (写注册表 + 创建静默启动 VBS)"""
+    if platform.system() != "Windows":
+        return False, "仅支持 Windows"
+    try:
+        import winreg
+        # 创建 VBS 静默启动脚本 (无黑窗)
+        vbs_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "start_agent.vbs")
+        python_exe = sys.executable
+        with open(vbs_path, "w", encoding="utf-8") as f:
+            f.write(f'Set ws = CreateObject("WScript.Shell")\n')
+            f.write(f'ws.Run """{python_exe}"" ""{AGENT_SCRIPT}""", 0, False\n')
+        # 写注册表
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(key, REG_NAME, 0, winreg.REG_SZ, f'wscript.exe "{vbs_path}"')
+        winreg.CloseKey(key)
+        return True, "已启用开机自启"
+    except Exception as e:
+        return False, f"启用失败: {e}"
+
+def disable_autostart():
+    """禁用开机自启 (删注册表项)"""
+    if platform.system() != "Windows":
+        return False, "仅支持 Windows"
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)
+        try:
+            winreg.DeleteValue(key, REG_NAME)
+        except FileNotFoundError:
+            pass
+        winreg.CloseKey(key)
+        # 清理 VBS
+        vbs_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "start_agent.vbs")
+        if os.path.exists(vbs_path):
+            os.remove(vbs_path)
+        return True, "已禁用开机自启"
+    except Exception as e:
+        return False, f"禁用失败: {e}"
 
 # ============ 配置管理 ============
 
@@ -200,6 +262,7 @@ class Agent:
             "net_online": online,
             "net_message": msg,
             "uptime": self.get_uptime(),
+            "autostart": is_autostart_enabled(),
             "version": "1.0",
         }
 
@@ -255,6 +318,12 @@ class Agent:
                 self._save_credentials()
                 success = True
                 message = f"已设置凭据: {self.net.username}"
+
+            elif command == "enable_autostart":
+                success, message = enable_autostart()
+
+            elif command == "disable_autostart":
+                success, message = disable_autostart()
                 
             else:
                 message = f"未知命令: {command}"
@@ -313,7 +382,16 @@ if __name__ == "__main__":
     parser.add_argument("--username", default=None, help="校园网账号")
     parser.add_argument("--password", default=None, help="校园网密码")
     parser.add_argument("--portal", default=None, help="Portal IP (默认 10.228.9.7)")
+    parser.add_argument("--autostart", action="store_true", help="启用开机自启")
+    parser.add_argument("--no-autostart", action="store_true", help="禁用开机自启")
     args = parser.parse_args()
+
+    if args.autostart:
+        ok, msg = enable_autostart()
+        print(f"  {'✓' if ok else '✗'} {msg}")
+    if args.no_autostart:
+        ok, msg = disable_autostart()
+        print(f"  {'✓' if ok else '✗'} {msg}")
     
     agent = Agent(server_url=args.server)
     
