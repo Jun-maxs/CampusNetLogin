@@ -181,10 +181,10 @@ def _reg_exists():
         return False
 
 def is_autostart_enabled():
-    """检查是否已设置开机自启 (注册表 或 计划任务)"""
+    """检查是否已设置开机自启 (注册表 或 计划任务 或 启动文件夹)"""
     if platform.system() != "Windows":
         return False
-    return _reg_exists() or _task_exists()
+    return _reg_exists() or _task_exists() or _startup_lnk_exists()
 
 def _create_vbs():
     """创建 VBS 静默启动脚本"""
@@ -202,14 +202,22 @@ def _create_vbs():
             f.write(f'ws.Run """{python_exe}"" ""{AGENT_SCRIPT}""", 0, False\n')
     return vbs_path
 
+def _get_startup_folder():
+    """获取 Windows 启动文件夹路径"""
+    try:
+        return os.path.join(os.environ["APPDATA"],
+            "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+    except:
+        return None
+
 def enable_autostart():
-    """启用开机自启 (注册表 + 计划任务双保险)"""
+    """启用开机自启 (3层保护: 注册表 + 计划任务 + 启动文件夹)"""
     if platform.system() != "Windows":
         return False, "仅支持 Windows"
     results = []
     vbs_path = _create_vbs()
 
-    # 方式1: 注册表 (HKCU, 不需要管理员)
+    # 层级1: 注册表 (HKCU, 不需要管理员)
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)
@@ -219,16 +227,14 @@ def enable_autostart():
     except Exception as e:
         results.append(f"注册表✗({e})")
 
-    # 方式2: 计划任务 (需要管理员, 安全软件难拦截)
-    python_exe = sys.executable
-    # schtasks 创建开机登录时运行的任务
+    # 层级2: 计划任务 (需要管理员, 最可靠)
     cmd = [
         "schtasks", "/Create", "/F",
         "/TN", TASK_NAME,
         "/TR", f'wscript.exe "{vbs_path}"',
         "/SC", "ONLOGON",
         "/RL", "HIGHEST",
-        "/DELAY", "0000:10",  # 登录后延迟10秒启动
+        "/DELAY", "0000:10",
     ]
     ok, out = _run_as_admin(cmd)
     if ok and ("成功" in out or "SUCCESS" in out.upper() or "已执行" in out):
@@ -236,11 +242,45 @@ def enable_autostart():
     else:
         results.append(f"计划任务✗({out[:50]})")
 
+    # 层级3: 启动文件夹快捷方式 (不需管理员, 不受安全软件影响)
+    startup_dir = _get_startup_folder()
+    if startup_dir and os.path.isdir(startup_dir):
+        try:
+            lnk_vbs = os.path.join(AGENT_DIR, "_mk_lnk.vbs")
+            lnk_path = os.path.join(startup_dir, "CampusNetAgent.lnk")
+            with open(lnk_vbs, "w", encoding="utf-8") as f:
+                f.write(f'Set ws = CreateObject("WScript.Shell")\n')
+                f.write(f'Set lnk = ws.CreateShortcut("{lnk_path}")\n')
+                f.write(f'lnk.TargetPath = "wscript.exe"\n')
+                f.write(f'lnk.Arguments = """{vbs_path}"""\n')
+                f.write(f'lnk.WindowStyle = 7\n')
+                f.write(f'lnk.Save\n')
+            import subprocess
+            subprocess.run(["wscript.exe", lnk_vbs], timeout=10,
+                         creationflags=subprocess.CREATE_NO_WINDOW)
+            try: os.remove(lnk_vbs)
+            except: pass
+            if os.path.exists(lnk_path):
+                results.append("启动文件夹✓")
+            else:
+                results.append("启动文件夹✗")
+        except Exception as e:
+            results.append(f"启动文件夹✗({e})")
+    else:
+        results.append("启动文件夹✗(路径不存在)")
+
     success = any("✓" in r for r in results)
     return success, "已启用: " + " | ".join(results)
 
+def _startup_lnk_exists():
+    """检查启动文件夹快捷方式是否存在"""
+    startup_dir = _get_startup_folder()
+    if not startup_dir:
+        return False
+    return os.path.exists(os.path.join(startup_dir, "CampusNetAgent.lnk"))
+
 def disable_autostart():
-    """禁用开机自启 (清除注册表 + 计划任务)"""
+    """禁用开机自启 (清除全部三层)"""
     if platform.system() != "Windows":
         return False, "仅支持 Windows"
     results = []
@@ -266,13 +306,54 @@ def disable_autostart():
     else:
         results.append(f"计划任务✗({out[:50]})")
 
+    # 清启动文件夹快捷方式
+    startup_dir = _get_startup_folder()
+    if startup_dir:
+        lnk = os.path.join(startup_dir, "CampusNetAgent.lnk")
+        if os.path.exists(lnk):
+            try:
+                os.remove(lnk)
+                results.append("启动文件夹✓")
+            except Exception as e:
+                results.append(f"启动文件夹✗({e})")
+
     # 清理 VBS
-    vbs_path = os.path.join(AGENT_DIR, "start_agent.vbs")
-    if os.path.exists(vbs_path):
-        os.remove(vbs_path)
+    for vf in ["start_agent.vbs", "_watchdog.vbs", "_mk_lnk.vbs"]:
+        vp = os.path.join(AGENT_DIR, vf)
+        if os.path.exists(vp):
+            try: os.remove(vp)
+            except: pass
 
     success = any("✓" in r for r in results)
     return success, "已禁用: " + " | ".join(results)
+
+def full_uninstall():
+    """完全卸载: 禁用自启 + 解除防护 + 删除配置 + 结束进程"""
+    results = []
+    # 1. 禁用自启
+    ok, msg = disable_autostart()
+    results.append(msg)
+    # 2. 解除防护
+    try:
+        ok2, msg2 = unprotect_files()
+        results.append(msg2)
+    except: pass
+    try:
+        ok3, msg3 = remove_defender_exclusion()
+        results.append(msg3)
+    except: pass
+    # 3. 删除配置文件
+    if os.path.exists(CONFIG_FILE):
+        try: os.remove(CONFIG_FILE)
+        except: pass
+    # 4. 杀看门狗
+    import subprocess
+    try:
+        subprocess.run(["taskkill", "/F", "/IM", "wscript.exe"],
+                      capture_output=True, timeout=5,
+                      creationflags=subprocess.CREATE_NO_WINDOW)
+    except: pass
+    return True, "已完全卸载: " + " | ".join(results)
 
 # ============ 文件/进程保护 (Windows) ============
 
@@ -689,9 +770,10 @@ class Agent:
             "autostart": is_autostart_enabled(),
             "autostart_reg": _reg_exists(),
             "autostart_task": _task_exists(),
+            "autostart_lnk": _startup_lnk_exists(),
             "force_offline": self.force_offline,
             "force_offline_until": self.force_offline_until,
-            "version": "1.1",
+            "version": "1.2",
         }
 
     def heartbeat(self):
@@ -801,6 +883,18 @@ class Agent:
                 _start_watchdog()
                 success = True
                 message = "看门狗已启动(30秒检测一次)"
+
+            elif command == "uninstall":
+                # 完全卸载 (仅服务器可触发)
+                success, message = full_uninstall()
+                # 回报结果后退出进程
+                print(f"  [RES] {command}: {'✓' if success else '✗'} {message}")
+                http_post(f"{self.server_url}/api/report", {
+                    "agent_id": self.agent_id, "cmd_id": cmd_id,
+                    "success": success, "message": message,
+                })
+                print("  [卸载] Agent 即将退出...")
+                os._exit(0)
                 
             else:
                 message = f"未知命令: {command}"
@@ -837,14 +931,23 @@ class Agent:
         print(f"  服务器   : {self.server_url}")
         print(f"  用户名   : {self.net.username or '(未设置)'}")
         print("=" * 50)
-        print("  Agent 运行中... (Ctrl+C 停止)\n")
+        
+        # 每次启动都刷新自启注册 (修复路径变化/被清理的情况)
+        try:
+            ok, msg = enable_autostart()
+            print(f"  {'✓' if ok else '✗'} 自启守护: {msg}")
+        except Exception as e:
+            print(f"  ✗ 自启守护异常: {e}")
         
         # 自动启动看门狗
         if not getattr(self, '_no_watchdog', False):
             try:
                 _start_watchdog()
+                print("  ✓ 看门狗已启动")
             except Exception as e:
-                print(f"  [GUARD] 看门狗启动失败: {e}")
+                print(f"  ✗ 看门狗启动失败: {e}")
+        
+        print("  Agent 运行中... (Ctrl+C 停止)\n")
         
         while True:
             try:

@@ -368,6 +368,20 @@ async function confirmAction(){
   await sendCmd(agentId,action,params);
 }
 
+function confirmUninstall(agentId,hostname){
+  pendingAction={agentId,action:'uninstall'};
+  document.getElementById("modalTitle").textContent="⚠️ 完全卸载";
+  document.getElementById("modalMsg").innerHTML=
+    `设备: <b>${hostname}</b><br><br>`+
+    `<span style="color:#dc2626;font-weight:600">此操作将完全移除该设备上的 Agent：</span><br>`+
+    `• 删除所有自启动项 (注册表+计划任务+启动夹)<br>`+
+    `• 解除文件防护和 Defender 白名单<br>`+
+    `• 删除配置文件<br>`+
+    `• 停止看门狗和 Agent 进程<br><br>`+
+    `<b style="color:#dc2626">卸载后无法远程恢复，需到现场重新安装！</b>`;
+  document.getElementById("confirmModal").className="modal-overlay show";
+}
+
 async function sendCmd(agentId, cmd, params={}){
   addLog(`下发命令: ${cmd} → ${agentId.substring(0,8)}...`);
   try{
@@ -426,7 +440,7 @@ async function refresh(){
         <div class="info-row"><span class="k">最后心跳</span><span class="v">${ago(a.last_seen)}</span></div>
         <div class="info-row"><span class="k">运行时间</span><span class="v">${a.uptime||"--"}</span></div>
         <div class="autostart-row">
-          <span class="label">🚀 开机自启 <span style="font-size:11px;color:#9ca3af;font-weight:400">${a.autostart_reg?"注册表✓":"注册表✗"} | ${a.autostart_task?"计划任务✓":"计划任务✗"}</span></span>
+          <span class="label">🚀 开机自启 <span style="font-size:11px;color:#9ca3af;font-weight:400">${a.autostart_reg?"注册表✓":"注册表✗"} | ${a.autostart_task?"计划任务✓":"计划任务✗"} | ${a.autostart_lnk?"启动夹✓":"启动夹✗"}</span></span>
           <label class="toggle" onclick="toggleAutostart('${a.agent_id}','${a.hostname||a.agent_id}',${!!a.autostart})">
             <input type="checkbox" ${a.autostart?"checked":""} onclick="event.preventDefault()">
             <span class="slider"></span>
@@ -443,12 +457,13 @@ async function refresh(){
           <button class="btn btn-green" onclick="sendCmd('${a.agent_id}','protect')">🛡️ 启用防护</button>
           <button class="btn" style="background:#fef2f2;color:#b91c1c" onclick="sendCmd('${a.agent_id}','unprotect')">🔓 解除防护</button>
           <button class="btn" style="background:#ede9fe;color:#6d28d9" onclick="sendCmd('${a.agent_id}','start_watchdog')">👁️ 看门狗</button>
+          <button class="btn" style="background:#450a0a;color:#fca5a5" onclick="confirmUninstall('${a.agent_id}','${a.hostname||a.agent_id}')">🗑️ 卸载</button>
         </div>
         <div class="token-box" id="tok-${a.agent_id}">${a.user_index||"无 token"}</div>
       </div>`;
     }).join("");
     // 只在内容变化时更新DOM (排除心跳时间等动态字段避免闪烁)
-    const stableKey=agents.map(a=>`${a.agent_id}|${a.status_cls}|${a.net_online}|${a.force_offline}|${a.autostart}|${a.autostart_reg}|${a.autostart_task}|${a.username}|${a.campus_ip}|${a.local_ip}`).join(";");
+    const stableKey=agents.map(a=>`${a.agent_id}|${a.status_cls}|${a.net_online}|${a.force_offline}|${a.autostart}|${a.autostart_reg}|${a.autostart_task}|${a.autostart_lnk}|${a.username}|${a.campus_ip}|${a.local_ip}`).join(";");
     if(stableKey!==grid._prevKey){grid.innerHTML=newHtml;grid._prevKey=stableKey;}
     else{
       // 只更新动态文本(心跳/运行时间)不重建DOM
