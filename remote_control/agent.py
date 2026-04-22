@@ -584,9 +584,6 @@ class Agent:
         self.net.password = self.cfg.get("password", "")
         self.net.user_index = self.cfg.get("user_index", "")
         
-        # 自动重连设置
-        self.reconnect_delay = self.cfg.get("reconnect_delay", 0)  # 0=禁用, >0=秒数
-        self.reconnect_at = 0      # 计划重连的时间戳
         self.was_online = False     # 上一次检测是否在线
         self.force_offline = False  # 强制离线锁: True时持续执行下线
         self.force_offline_until = 0   # 强制离线到期时间戳 (0=永久直到手动解锁)
@@ -631,14 +628,16 @@ class Agent:
             else:
                 msg = "强制离线中(永久)"
         
-        # 自动重连状态描述
-        rc_status = "禁用"
-        if self.reconnect_delay > 0:
-            if self.reconnect_at > 0:
-                left = int(self.reconnect_at - time.time())
-                rc_status = f"{left}秒后重连" if left > 0 else "重连中..."
-            else:
-                rc_status = f"已启用 ({self.reconnect_delay}秒)"
+        # 断连单次触发: 从在线→离线时, 自动执行一次full_logout清理无感认证
+        if self.was_online and not online and not self.force_offline:
+            print("  [断连] 检测到网络断开, 单次清理无感认证...")
+            self.net.cancel_mab()
+            self.net.cancel_mac_by_name()
+            try:
+                self.net.logout()
+            except: pass
+            print("  [断连] 清理完毕")
+        self.was_online = online
         
         return {
             "agent_id": self.agent_id,
@@ -655,11 +654,9 @@ class Agent:
             "autostart": is_autostart_enabled(),
             "autostart_reg": _reg_exists(),
             "autostart_task": _task_exists(),
-            "reconnect_delay": self.reconnect_delay,
-            "reconnect_status": rc_status,
             "force_offline": self.force_offline,
             "force_offline_until": self.force_offline_until,
-            "version": "1.0",
+            "version": "1.1",
         }
 
     def heartbeat(self):
@@ -705,25 +702,11 @@ class Agent:
                 success = r1.get("result")=="success" or r2.get("result")=="success"
                 message = f"cancelMab:{r1.get('result','')} cancelMac:{r2.get('result','')}"
 
-            elif command == "set_reconnect":
-                delay = int(params.get("delay", 0))
-                self.reconnect_delay = delay
-                self.cfg["reconnect_delay"] = delay
-                save_config(self.cfg)
-                self.reconnect_at = 0
-                success = True
-                if delay > 0:
-                    message = f"自动重连已启用: 下线后 {delay}秒重连"
-                else:
-                    message = "自动重连已禁用"
-
             elif command == "unlock":
                 self.force_offline = False
+                self.force_offline_until = 0
                 success = True
                 message = "强制离线锁已解除"
-                if self.reconnect_delay > 0:
-                    self.reconnect_at = time.time() + self.reconnect_delay
-                    message += f" | {self.reconnect_delay}秒后自动重连"
 
             elif command == "login_now":
                 # 立即登录 (本地执行，不需要网络到服务器)
@@ -807,31 +790,8 @@ class Agent:
         self.cfg["server"] = self.server_url
         save_config(self.cfg)
 
-    def _check_auto_reconnect(self):
-        """检查是否需要自动重连"""
-        if self.force_offline:
-            return  # 强制离线中，跳过自动重连
-        if self.reconnect_at <= 0:
-            return
-        if time.time() < self.reconnect_at:
-            return
-        # 到时间了，自动登录
-        self.reconnect_at = 0
-        if not self.net.username or not self.net.password:
-            print("  [重连] 无保存的账号密码，跳过")
-            return
-        print(f"  [重连] 自动登录: {self.net.username}")
-        r = self.net.login(self.net.username, self.net.password)
-        ok = r.get("result") == "success"
-        print(f"  [重连] {'\u2713 成功' if ok else '\u2717 失败'}: {r.get('message','')}")
-        if not ok and self.reconnect_delay > 0:
-            # 失败了，再试
-            self.reconnect_at = time.time() + self.reconnect_delay
-            print(f"  [重连] {self.reconnect_delay}秒后重试")
-
     def run(self):
         """主循环"""
-        rc_info = f"已启用({self.reconnect_delay}秒)" if self.reconnect_delay > 0 else "禁用"
         print("=" * 50)
         print("  校园网远程控制 - Agent")
         print("=" * 50)
@@ -841,7 +801,6 @@ class Agent:
         print(f"  本机 IP  : {get_local_ip()}")
         print(f"  服务器   : {self.server_url}")
         print(f"  用户名   : {self.net.username or '(未设置)'}")
-        print(f"  自动重连 : {rc_info}")
         print("=" * 50)
         print("  Agent 运行中... (Ctrl+C 停止)\n")
         
@@ -854,7 +813,6 @@ class Agent:
         
         while True:
             try:
-                self._check_auto_reconnect()
                 self.heartbeat()
             except KeyboardInterrupt:
                 print("\n  Agent 已停止")

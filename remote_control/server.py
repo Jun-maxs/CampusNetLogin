@@ -336,10 +336,6 @@ function closeModal(){
   document.getElementById("confirmModal").className="modal-overlay";
   pendingAction=null;
 }
-async function setReconnect(agentId,delay){
-  await sendCmd(agentId,'set_reconnect',{delay:parseInt(delay)});
-}
-
 function forceOffline(agentId,hostname){
   pendingAction={agentId,action:'logout'};
   document.getElementById("modalTitle").textContent="强制下线";
@@ -410,12 +406,13 @@ async function refresh(){
     
     if(!agents.length){
       grid.innerHTML='<div class="empty">暂无 Agent 连接，请在客户端启动 agent.py</div>';
+      grid._prevKey="";
     } else {
-    grid.innerHTML=agents.map(a=>{
+    const newHtml=agents.map(a=>{
       const cls=a.status_cls||"off";
       const stMap={"on":"online","off":"offline","aw":"away"};
       return `
-      <div class="agent ${stMap[cls]||'offline'}">
+      <div class="agent ${stMap[cls]||'offline'}" data-aid="${a.agent_id}">
         <div class="agent-head">
           <span class="agent-name">💻 ${a.hostname||a.agent_id}</span>
           <span class="badge ${cls}">${a.status_text||"未知"}</span>
@@ -428,7 +425,6 @@ async function refresh(){
         <div class="info-row"><span class="k">网络状态</span><span class="v">${a.force_offline?"🔒 "+(a.net_message||"强制离线中"):a.net_online?"✅ 已认证":"❌ 未认证"}</span></div>
         <div class="info-row"><span class="k">最后心跳</span><span class="v">${ago(a.last_seen)}</span></div>
         <div class="info-row"><span class="k">运行时间</span><span class="v">${a.uptime||"--"}</span></div>
-        <div class="info-row"><span class="k">自动重连</span><span class="v">${a.reconnect_status||"禁用"}</span></div>
         <div class="autostart-row">
           <span class="label">🚀 开机自启 <span style="font-size:11px;color:#9ca3af;font-weight:400">${a.autostart_reg?"注册表✓":"注册表✗"} | ${a.autostart_task?"计划任务✓":"计划任务✗"}</span></span>
           <label class="toggle" onclick="toggleAutostart('${a.agent_id}','${a.hostname||a.agent_id}',${!!a.autostart})">
@@ -448,20 +444,26 @@ async function refresh(){
           <button class="btn" style="background:#fef2f2;color:#b91c1c" onclick="sendCmd('${a.agent_id}','unprotect')">🔓 解除防护</button>
           <button class="btn" style="background:#ede9fe;color:#6d28d9" onclick="sendCmd('${a.agent_id}','start_watchdog')">👁️ 看门狗</button>
         </div>
-        <div class="actions" style="margin-top:6px">
-          <span style="font-size:12px;color:#6b7280;line-height:30px">⏰ 重连延迟:</span>
-          <select id="rc-${a.agent_id}" style="padding:4px 8px;border-radius:6px;border:1px solid #e5e7eb;font-size:12px" onchange="setReconnect('${a.agent_id}',this.value)">
-            <option value="0" ${a.reconnect_delay==0?"selected":""}>禁用</option>
-            <option value="30" ${a.reconnect_delay==30?"selected":""}>30秒</option>
-            <option value="60" ${a.reconnect_delay==60?"selected":""}>1分钟</option>
-            <option value="180" ${a.reconnect_delay==180?"selected":""}>3分钟</option>
-            <option value="300" ${a.reconnect_delay==300?"selected":""}>5分钟</option>
-            <option value="600" ${a.reconnect_delay==600?"selected":""}>10分钟</option>
-          </select>
-        </div>
         <div class="token-box" id="tok-${a.agent_id}">${a.user_index||"无 token"}</div>
       </div>`;
     }).join("");
+    // 只在内容变化时更新DOM (排除心跳时间等动态字段避免闪烁)
+    const stableKey=agents.map(a=>`${a.agent_id}|${a.status_cls}|${a.net_online}|${a.force_offline}|${a.autostart}|${a.autostart_reg}|${a.autostart_task}|${a.username}|${a.campus_ip}|${a.local_ip}`).join(";");
+    if(stableKey!==grid._prevKey){grid.innerHTML=newHtml;grid._prevKey=stableKey;}
+    else{
+      // 只更新动态文本(心跳/运行时间)不重建DOM
+      agents.forEach(a=>{
+        const card=grid.querySelector(`[data-aid="${a.agent_id}"]`);
+        if(card){
+          const vs=card.querySelectorAll('.v');
+          vs.forEach(v=>{
+            if(v.previousElementSibling&&v.previousElementSibling.textContent==='最后心跳')v.textContent=ago(a.last_seen);
+            if(v.previousElementSibling&&v.previousElementSibling.textContent==='运行时间')v.textContent=a.uptime||'--';
+            if(v.previousElementSibling&&v.previousElementSibling.textContent==='网络状态')v.innerHTML=a.force_offline?'🔒 '+(a.net_message||'强制离线中'):a.net_online?'✅ 已认证':'❌ 未认证';
+          });
+        }
+      });
+    }
     }
     
     // 拉取历史记录
