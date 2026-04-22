@@ -15,8 +15,19 @@ PORTAL_IP = "10.228.9.7"
 # API 鉴权密钥 (服务器和客户端必须一致)
 API_SECRET = "CampusNet@2026#Secure"
 HEARTBEAT_INTERVAL = 5  # 心跳间隔(秒)
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_config.json")
-AGENT_SCRIPT = os.path.abspath(__file__)
+
+# PyInstaller 打包后 __file__ 指向临时目录, 需用 exe 实际路径
+if getattr(sys, 'frozen', False):
+    # 打包后: sys.executable = exe 实际路径
+    AGENT_EXE = sys.executable
+    AGENT_DIR = os.path.dirname(AGENT_EXE)
+else:
+    # 开发环境: 直接用脚本路径
+    AGENT_EXE = os.path.abspath(__file__)
+    AGENT_DIR = os.path.dirname(AGENT_EXE)
+
+CONFIG_FILE = os.path.join(AGENT_DIR, "agent_config.json")
+AGENT_SCRIPT = AGENT_EXE
 REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 REG_NAME = "CampusNetAgent"
 
@@ -104,8 +115,8 @@ def _run_as_admin(cmd_args):
         
         # 需要 UAC 提权
         import ctypes
-        bat_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "_admin_cmd.bat")
-        result_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "_admin_result.txt")
+        bat_path = os.path.join(AGENT_DIR, "_admin_cmd.bat")
+        result_path = os.path.join(AGENT_DIR, "_admin_result.txt")
         # 删除旧的结果文件
         if os.path.exists(result_path):
             os.remove(result_path)
@@ -177,11 +188,18 @@ def is_autostart_enabled():
 
 def _create_vbs():
     """创建 VBS 静默启动脚本"""
-    vbs_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "start_agent.vbs")
-    python_exe = sys.executable
-    with open(vbs_path, "w", encoding="utf-8") as f:
-        f.write(f'Set ws = CreateObject("WScript.Shell")\n')
-        f.write(f'ws.Run """{python_exe}"" ""{AGENT_SCRIPT}""", 0, False\n')
+    vbs_path = os.path.join(AGENT_DIR, "start_agent.vbs")
+    if getattr(sys, 'frozen', False):
+        # 打包后: 直接启动 exe
+        with open(vbs_path, "w", encoding="utf-8") as f:
+            f.write(f'Set ws = CreateObject("WScript.Shell")\n')
+            f.write(f'ws.Run """{AGENT_EXE}""", 0, False\n')
+    else:
+        # 开发环境: 用 python 启动脚本
+        python_exe = sys.executable
+        with open(vbs_path, "w", encoding="utf-8") as f:
+            f.write(f'Set ws = CreateObject("WScript.Shell")\n')
+            f.write(f'ws.Run """{python_exe}"" ""{AGENT_SCRIPT}""", 0, False\n')
     return vbs_path
 
 def enable_autostart():
@@ -249,7 +267,7 @@ def disable_autostart():
         results.append(f"计划任务✗({out[:50]})")
 
     # 清理 VBS
-    vbs_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "start_agent.vbs")
+    vbs_path = os.path.join(AGENT_DIR, "start_agent.vbs")
     if os.path.exists(vbs_path):
         os.remove(vbs_path)
 
@@ -341,11 +359,28 @@ def _start_watchdog():
     if platform.system() != "Windows":
         return
     import subprocess
-    watchdog_vbs = os.path.join(os.path.dirname(AGENT_SCRIPT), "_watchdog.vbs")
-    python_exe = sys.executable
+    watchdog_vbs = os.path.join(AGENT_DIR, "_watchdog.vbs")
     pid = os.getpid()
-    # VBS 看门狗: 每30秒检查进程是否存活, 不存在则重启
-    vbs_code = f'''Set ws = CreateObject("WScript.Shell")
+    if getattr(sys, 'frozen', False):
+        # 打包后: 监控 exe 进程名
+        exe_name = os.path.basename(AGENT_EXE)
+        vbs_code = f'''Set ws = CreateObject("WScript.Shell")
+WScript.Sleep 10000
+Do While True
+    On Error Resume Next
+    Set objWMI = GetObject("winmgmts:")
+    Set procs = objWMI.ExecQuery("SELECT * FROM Win32_Process WHERE Name = '{exe_name}'")
+    If procs.Count = 0 Then
+        ws.Run """{AGENT_EXE}""", 0, False
+    End If
+    On Error Goto 0
+    WScript.Sleep 30000
+Loop
+'''
+    else:
+        # 开发环境: 监控 python 进程
+        python_exe = sys.executable
+        vbs_code = f'''Set ws = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 agentScript = "{AGENT_SCRIPT}"
 pythonExe = "{python_exe}"
