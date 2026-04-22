@@ -250,6 +250,10 @@ async function confirmAction(){
   await sendCmd(agentId,action);
 }
 
+async function setReconnect(agentId,delay){
+  await sendCmd(agentId,'set_reconnect',{delay:parseInt(delay)});
+}
+
 async function sendCmd(agentId, cmd, params={}){
   addLog(`下发命令: ${cmd} → ${agentId.substring(0,8)}...`);
   try{
@@ -311,6 +315,7 @@ async function refresh(){
         <div class="info-row"><span class="k">网络状态</span><span class="v">${a.net_online?"✅ 已认证":"❌ 未认证"}</span></div>
         <div class="info-row"><span class="k">最后心跳</span><span class="v">${ago(a.last_seen)}</span></div>
         <div class="info-row"><span class="k">运行时间</span><span class="v">${a.uptime||"--"}</span></div>
+        <div class="info-row"><span class="k">自动重连</span><span class="v">${a.reconnect_status||"禁用"}</span></div>
         <div class="autostart-row">
           <span class="label">🚀 开机自启</span>
           <label class="toggle" onclick="toggleAutostart('${a.agent_id}','${a.hostname||a.agent_id}',${!!a.autostart})">
@@ -319,10 +324,21 @@ async function refresh(){
           </label>
         </div>
         <div class="actions">
-          <button class="btn btn-red" onclick="sendCmd('${a.agent_id}','logout')">⏏ 下线</button>
-          <button class="btn btn-green" onclick="sendCmd('${a.agent_id}','login')">🔌 上线</button>
-          <button class="btn btn-blue" onclick="sendCmd('${a.agent_id}','refresh')">🔄 刷新</button>
-          <button class="btn btn-orange" onclick="toggleToken('${a.agent_id}')">🔑 Token</button>
+          <button class="btn btn-red" onclick="sendCmd('${a.agent_id}','logout')">⏏ 下线+取消无感</button>
+          <button class="btn btn-blue" onclick="sendCmd('${a.agent_id}','refresh')">� 刷新</button>
+          <button class="btn btn-orange" onclick="sendCmd('${a.agent_id}','cancel_mab')">� 取消无感</button>
+          <button class="btn" style="background:#f1f5f9;color:#64748b" onclick="toggleToken('${a.agent_id}')">� Token</button>
+        </div>
+        <div class="actions" style="margin-top:6px">
+          <span style="font-size:12px;color:#6b7280;line-height:30px">⏰ 重连延迟:</span>
+          <select id="rc-${a.agent_id}" style="padding:4px 8px;border-radius:6px;border:1px solid #e5e7eb;font-size:12px" onchange="setReconnect('${a.agent_id}',this.value)">
+            <option value="0" ${a.reconnect_delay==0?"selected":""}>禁用</option>
+            <option value="30" ${a.reconnect_delay==30?"selected":""}>30秒</option>
+            <option value="60" ${a.reconnect_delay==60?"selected":""}>1分钟</option>
+            <option value="180" ${a.reconnect_delay==180?"selected":""}>3分钟</option>
+            <option value="300" ${a.reconnect_delay==300?"selected":""}>5分钟</option>
+            <option value="600" ${a.reconnect_delay==600?"selected":""}>10分钟</option>
+          </select>
         </div>
         <div class="token-box" id="tok-${a.agent_id}">${a.user_index||"无 token"}</div>
       </div>`;

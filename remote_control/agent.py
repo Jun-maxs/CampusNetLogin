@@ -204,6 +204,39 @@ class CampusNet:
         except Exception as e:
             return {"result": "fail", "message": str(e)}
 
+    def cancel_mab(self):
+        """取消本机无感认证 (cancelMab)"""
+        if not self.user_index:
+            return {"result": "fail", "message": "无 userIndex"}
+        try:
+            url = f"{self.base_url}/eportal/InterFace.do?method=cancelMab"
+            data = urllib.parse.urlencode({"userIndex": self.user_index}).encode()
+            req = urllib.request.Request(url, data=data, method="POST")
+            req.add_header("Content-Type", "application/x-www-form-urlencoded")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                text = resp.read().decode("utf-8")
+                print(f"  [NET] cancelMab: {text[:120]}")
+                return json.loads(text)
+        except Exception as e:
+            return {"result": "fail", "message": str(e)}
+
+    def cancel_mac_by_name(self):
+        """用账号+MAC取消无感认证绑定 (cancelMacWithUserNameAndMac)"""
+        if not self.username:
+            return {"result": "fail", "message": "无用户名"}
+        try:
+            mac = get_mac().replace(":", "")
+            url = f"{self.base_url}/eportal/InterFace.do?method=cancelMacWithUserNameAndMac"
+            data = urllib.parse.urlencode({"userId": self.username, "usermac": mac}).encode()
+            req = urllib.request.Request(url, data=data, method="POST")
+            req.add_header("Content-Type", "application/x-www-form-urlencoded")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                text = resp.read().decode("utf-8")
+                print(f"  [NET] cancelMacByName: {text[:120]}")
+                return json.loads(text)
+        except Exception as e:
+            return {"result": "fail", "message": str(e)}
+
     def logout(self):
         """注销"""
         if not self.user_index:
@@ -222,6 +255,20 @@ class CampusNet:
         except Exception as e:
             return {"result": "fail", "message": str(e)}
 
+    def full_logout(self):
+        """完整下线: 取消无感认证 + 注销"""
+        results = []
+        # 1. 取消无感认证 (两种方式都试)
+        r1 = self.cancel_mab()
+        results.append(f"cancelMab: {r1.get('result','')}")
+        r2 = self.cancel_mac_by_name()
+        results.append(f"cancelMac: {r2.get('result','')}")
+        # 2. 注销
+        r3 = self.logout()
+        results.append(f"logout: {r3.get('result','')}")
+        ok = r3.get("result") == "success"
+        return {"result": "success" if ok else "fail", "message": " | ".join(results)}
+
 # ============ Agent 主类 ============
 
 class Agent:
@@ -238,6 +285,11 @@ class Agent:
         self.net.username = self.cfg.get("username", "")
         self.net.password = self.cfg.get("password", "")
         self.net.user_index = self.cfg.get("user_index", "")
+        
+        # 自动重连设置
+        self.reconnect_delay = self.cfg.get("reconnect_delay", 0)  # 0=禁用, >0=秒数
+        self.reconnect_at = 0      # 计划重连的时间戳
+        self.was_online = False     # 上一次检测是否在线
 
     def get_uptime(self):
         s = int(time.time() - self.start_time)
@@ -250,6 +302,16 @@ class Agent:
         online, campus_ip, ui, msg = self.net.check_online()
         if ui:
             self.net.user_index = ui
+        
+        # 自动重连状态描述
+        rc_status = "禁用"
+        if self.reconnect_delay > 0:
+            if self.reconnect_at > 0:
+                left = int(self.reconnect_at - time.time())
+                rc_status = f"{left}秒后重连" if left > 0 else "重连中..."
+            else:
+                rc_status = f"已启用 ({self.reconnect_delay}秒)"
+        
         return {
             "agent_id": self.agent_id,
             "hostname": self.hostname,
@@ -263,6 +325,8 @@ class Agent:
             "net_message": msg,
             "uptime": self.get_uptime(),
             "autostart": is_autostart_enabled(),
+            "reconnect_delay": self.reconnect_delay,
+            "reconnect_status": rc_status,
             "version": "1.0",
         }
 
@@ -289,9 +353,40 @@ class Agent:
         
         try:
             if command == "logout":
-                r = self.net.logout()
+                r = self.net.full_logout()
                 success = r.get("result") == "success"
                 message = r.get("message", "已下线" if success else "下线失败")
+                # 如果有自动重连，设置重连时间
+                if success and self.reconnect_delay > 0:
+                    self.reconnect_at = time.time() + self.reconnect_delay
+                    message += f" | {self.reconnect_delay}秒后自动重连"
+
+            elif command == "cancel_mab":
+                r1 = self.net.cancel_mab()
+                r2 = self.net.cancel_mac_by_name()
+                success = r1.get("result")=="success" or r2.get("result")=="success"
+                message = f"cancelMab:{r1.get('result','')} cancelMac:{r2.get('result','')}"
+
+            elif command == "set_reconnect":
+                delay = int(params.get("delay", 0))
+                self.reconnect_delay = delay
+                self.cfg["reconnect_delay"] = delay
+                save_config(self.cfg)
+                self.reconnect_at = 0
+                success = True
+                if delay > 0:
+                    message = f"自动重连已启用: 下线后 {delay}秒重连"
+                else:
+                    message = "自动重连已禁用"
+
+            elif command == "login_now":
+                # 立即登录 (本地执行，不需要网络到服务器)
+                if self.net.username and self.net.password:
+                    r = self.net.login(self.net.username, self.net.password)
+                    success = r.get("result") == "success"
+                    message = r.get("message", "已登录" if success else "登录失败")
+                else:
+                    message = "无保存的账号密码"
                 
             elif command == "login":
                 username = params.get("username", self.net.username)
@@ -348,8 +443,29 @@ class Agent:
         self.cfg["server"] = self.server_url
         save_config(self.cfg)
 
+    def _check_auto_reconnect(self):
+        """检查是否需要自动重连"""
+        if self.reconnect_at <= 0:
+            return
+        if time.time() < self.reconnect_at:
+            return
+        # 到时间了，自动登录
+        self.reconnect_at = 0
+        if not self.net.username or not self.net.password:
+            print("  [重连] 无保存的账号密码，跳过")
+            return
+        print(f"  [重连] 自动登录: {self.net.username}")
+        r = self.net.login(self.net.username, self.net.password)
+        ok = r.get("result") == "success"
+        print(f"  [重连] {'\u2713 成功' if ok else '\u2717 失败'}: {r.get('message','')}")
+        if not ok and self.reconnect_delay > 0:
+            # 失败了，再试
+            self.reconnect_at = time.time() + self.reconnect_delay
+            print(f"  [重连] {self.reconnect_delay}秒后重试")
+
     def run(self):
         """主循环"""
+        rc_info = f"已启用({self.reconnect_delay}秒)" if self.reconnect_delay > 0 else "禁用"
         print("=" * 50)
         print("  校园网远程控制 - Agent")
         print("=" * 50)
@@ -359,11 +475,13 @@ class Agent:
         print(f"  本机 IP  : {get_local_ip()}")
         print(f"  服务器   : {self.server_url}")
         print(f"  用户名   : {self.net.username or '(未设置)'}")
+        print(f"  自动重连 : {rc_info}")
         print("=" * 50)
         print("  Agent 运行中... (Ctrl+C 停止)\n")
         
         while True:
             try:
+                self._check_auto_reconnect()
                 self.heartbeat()
             except KeyboardInterrupt:
                 print("\n  Agent 已停止")
