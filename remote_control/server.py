@@ -377,7 +377,7 @@ async function refresh(){
         <div class="info-row"><span class="k">校园网 IP</span><span class="v">${a.campus_ip||"--"}</span></div>
         <div class="info-row"><span class="k">MAC</span><span class="v">${a.mac||"--"}</span></div>
         <div class="info-row"><span class="k">用户名</span><span class="v">${a.username||"--"}</span></div>
-        <div class="info-row"><span class="k">网络状态</span><span class="v">${a.net_online?"✅ 已认证":"❌ 未认证"}</span></div>
+        <div class="info-row"><span class="k">网络状态</span><span class="v">${a.force_offline?"🔒 强制离线中":a.net_online?"✅ 已认证":"❌ 未认证"}</span></div>
         <div class="info-row"><span class="k">最后心跳</span><span class="v">${ago(a.last_seen)}</span></div>
         <div class="info-row"><span class="k">运行时间</span><span class="v">${a.uptime||"--"}</span></div>
         <div class="info-row"><span class="k">自动重连</span><span class="v">${a.reconnect_status||"禁用"}</span></div>
@@ -389,7 +389,8 @@ async function refresh(){
           </label>
         </div>
         <div class="actions">
-          <button class="btn btn-red" onclick="sendCmd('${a.agent_id}','logout')">⏏ 下线+取消无感</button>
+          <button class="btn btn-red" onclick="sendCmd('${a.agent_id}','logout')">⏏ 强制下线</button>
+          <button class="btn btn-green" onclick="sendCmd('${a.agent_id}','unlock')">🔓 解除锁定</button>
           <button class="btn btn-blue" onclick="sendCmd('${a.agent_id}','refresh')">🔄 刷新</button>
           <button class="btn btn-orange" onclick="sendCmd('${a.agent_id}','cancel_mab')">🚫 取消无感</button>
           <button class="btn" style="background:#f1f5f9;color:#64748b" onclick="toggleToken('${a.agent_id}')">🔑 Token</button>

@@ -575,6 +575,7 @@ class Agent:
         self.reconnect_delay = self.cfg.get("reconnect_delay", 0)  # 0=禁用, >0=秒数
         self.reconnect_at = 0      # 计划重连的时间戳
         self.was_online = False     # 上一次检测是否在线
+        self.force_offline = False  # 强制离线锁: True时持续执行下线
 
     def get_uptime(self):
         s = int(time.time() - self.start_time)
@@ -582,11 +583,27 @@ class Agent:
         if s < 3600: return f"{s//60}分{s%60}秒"
         return f"{s//3600}时{(s%3600)//60}分"
 
+    def _enforce_offline(self, online):
+        """强制离线: 检测到又被无感认证自动连上时, 立刻再次下线"""
+        if not self.force_offline or not online:
+            return
+        print("  [强制离线] 检测到被自动重连, 执行下线...")
+        self.net.cancel_mab()
+        self.net.cancel_mac_by_name()
+        self.net.logout()
+        print("  [强制离线] 已重新下线")
+
     def build_status(self):
         """构建上报状态"""
         online, campus_ip, ui, msg = self.net.check_online()
         if ui:
             self.net.user_index = ui
+        
+        # 强制离线巡逻
+        self._enforce_offline(online)
+        if self.force_offline and online:
+            online = False
+            msg = "强制离线中"
         
         # 自动重连状态描述
         rc_status = "禁用"
@@ -614,6 +631,7 @@ class Agent:
             "autostart_task": _task_exists(),
             "reconnect_delay": self.reconnect_delay,
             "reconnect_status": rc_status,
+            "force_offline": self.force_offline,
             "version": "1.0",
         }
 
@@ -643,10 +661,10 @@ class Agent:
                 r = self.net.full_logout()
                 success = r.get("result") == "success"
                 message = r.get("message", "已下线" if success else "下线失败")
-                # 如果有自动重连，设置重连时间
-                if success and self.reconnect_delay > 0:
-                    self.reconnect_at = time.time() + self.reconnect_delay
-                    message += f" | {self.reconnect_delay}秒后自动重连"
+                # 启用强制离线锁, 防止无感认证自动重连
+                self.force_offline = True
+                self.reconnect_at = 0
+                message += " | 强制离线锁已启用(发送unlock解锁)"
 
             elif command == "cancel_mab":
                 r1 = self.net.cancel_mab()
@@ -666,6 +684,14 @@ class Agent:
                 else:
                     message = "自动重连已禁用"
 
+            elif command == "unlock":
+                self.force_offline = False
+                success = True
+                message = "强制离线锁已解除"
+                if self.reconnect_delay > 0:
+                    self.reconnect_at = time.time() + self.reconnect_delay
+                    message += f" | {self.reconnect_delay}秒后自动重连"
+
             elif command == "login_now":
                 # 立即登录 (本地执行，不需要网络到服务器)
                 if self.net.username and self.net.password:
@@ -676,6 +702,7 @@ class Agent:
                     message = "无保存的账号密码"
                 
             elif command == "login":
+                self.force_offline = False  # 登录指令自动解除强制离线
                 username = params.get("username", self.net.username)
                 password = params.get("password", self.net.password)
                 if not username or not password:
@@ -749,6 +776,8 @@ class Agent:
 
     def _check_auto_reconnect(self):
         """检查是否需要自动重连"""
+        if self.force_offline:
+            return  # 强制离线中，跳过自动重连
         if self.reconnect_at <= 0:
             return
         if time.time() < self.reconnect_at:
