@@ -46,10 +46,8 @@ def build():
         "--workpath", os.path.join(SCRIPT_DIR, "build"),
         "--specpath", SCRIPT_DIR,
         "--noconsole",
-        "--hidden-import", "tkinter",
-        "--hidden-import", "tkinter.ttk",
-        "--hidden-import", "tkinter.messagebox",
         "--uac-admin",
+        "--exclude-module", "tkinter",
         AGENT_PY,
     ]
 
