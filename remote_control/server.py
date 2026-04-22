@@ -2,17 +2,64 @@
 """
 校园网远程控制面板 - Server
 功能: 查看所有 Agent 状态、远程下线/登录、查看 token
+      持久化存储: 历史 Agent、命令记录均保存到磁盘
 """
 import json, time, uuid, os, threading
 from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
 
-# ============ 数据存储 (内存) ============
+# ============ 持久化存储 ============
+DATA_DIR = os.path.dirname(os.path.abspath(__file__))
+AGENTS_FILE = os.path.join(DATA_DIR, "server_agents.json")
+HISTORY_FILE = os.path.join(DATA_DIR, "server_history.json")
+
 agents = {}      # agent_id -> {状态信息}
 commands = {}    # agent_id -> [待执行命令列表]
-cmd_results = {} # cmd_id -> {执行结果}
+history = []     # [{time, agent_id, hostname, action, detail, success}]
 lock = threading.Lock()
+
+def _load_data():
+    global agents, history
+    if os.path.exists(AGENTS_FILE):
+        try:
+            with open(AGENTS_FILE, "r", encoding="utf-8") as f:
+                agents.update(json.load(f))
+            print(f"  [DATA] 已加载 {len(agents)} 个历史 Agent")
+        except: pass
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                history.extend(json.load(f))
+            print(f"  [DATA] 已加载 {len(history)} 条历史记录")
+        except: pass
+
+def _save_agents():
+    try:
+        with open(AGENTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(agents, f, ensure_ascii=False, indent=2)
+    except: pass
+
+def _save_history():
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history[-500:], f, ensure_ascii=False, indent=2)
+    except: pass
+
+def _add_history(agent_id, action, detail="", success=None):
+    hostname = agents.get(agent_id, {}).get("hostname", agent_id[:8])
+    entry = {
+        "time": time.time(),
+        "agent_id": agent_id,
+        "hostname": hostname,
+        "action": action,
+        "detail": detail,
+        "success": success,
+    }
+    history.append(entry)
+    if len(history) > 500:
+        del history[:-500]
+    _save_history()
 
 # ============ API: Agent 端 ============
 
@@ -24,8 +71,15 @@ def heartbeat():
     if not aid:
         return jsonify({"error": "no agent_id"}), 400
     with lock:
-        agents[aid] = {**data, "last_seen": time.time()}
+        is_new = aid not in agents
+        was_alive = agents.get(aid, {}).get("alive", False)
+        agents[aid] = {**data, "last_seen": time.time(), "alive": True}
         pending = commands.pop(aid, [])
+        _save_agents()
+        if is_new:
+            _add_history(aid, "首次连接", f"主机: {data.get('hostname','')} IP: {data.get('local_ip','')}")
+        elif not was_alive:
+            _add_history(aid, "重新上线", f"IP: {data.get('local_ip','')}")
     return jsonify({"commands": pending})
 
 @app.route("/api/report", methods=["POST"])
@@ -33,15 +87,10 @@ def report():
     """Agent 回报命令执行结果"""
     data = request.json or {}
     cid = data.get("cmd_id")
+    aid = data.get("agent_id", "")
     if cid:
         with lock:
-            cmd_results[cid] = {
-                "agent_id": data.get("agent_id"),
-                "cmd_id": cid,
-                "success": data.get("success", False),
-                "message": data.get("message", ""),
-                "time": time.time(),
-            }
+            _add_history(aid, f"命令结果", data.get("message", ""), data.get("success"))
     return jsonify({"ok": True})
 
 # ============ API: Web 面板 ============
@@ -53,9 +102,22 @@ def get_agents():
     with lock:
         for aid, d in agents.items():
             item = dict(d)
-            item["alive"] = (now - d.get("last_seen", 0)) < 30
+            last = d.get("last_seen", 0)
+            dt = now - last
+            if dt > 30:
+                item["alive"] = False
+                if dt > 300:
+                    item["status_text"] = "离线"
+                    item["status_cls"] = "off"
+                else:
+                    item["status_text"] = "失联"
+                    item["status_cls"] = "aw"
+            else:
+                item["alive"] = True
+                item["status_text"] = "在线" if d.get("net_online") else "已连接(未认证)"
+                item["status_cls"] = "on" if d.get("net_online") else "aw"
             result.append(item)
-    result.sort(key=lambda x: x.get("last_seen", 0), reverse=True)
+    result.sort(key=lambda x: (0 if x.get("alive") else 1, -x.get("last_seen", 0)))
     return jsonify(result)
 
 @app.route("/api/command", methods=["POST"])
@@ -74,14 +136,17 @@ def send_command():
             "params": data.get("params", {}),
             "time": time.time(),
         })
+        _add_history(aid, f"下发命令: {cmd}", json.dumps(data.get("params", {}), ensure_ascii=False))
     return jsonify({"ok": True, "cmd_id": cid})
 
-@app.route("/api/results")
-def get_results():
+@app.route("/api/history")
+def get_history():
+    """获取操作历史"""
+    n = request.args.get("n", 100, type=int)
     with lock:
-        items = list(cmd_results.values())
-    items.sort(key=lambda x: x.get("time", 0), reverse=True)
-    return jsonify(items[:50])
+        items = history[-n:]
+    items.reverse()
+    return jsonify(items)
 
 # ============ Web 面板 ============
 
@@ -199,8 +264,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 </div>
 
 <div class="section">
-    <h2>📋 操作日志</h2>
+    <h2>📋 操作日志 <span style="font-size:12px;color:#9ca3af;font-weight:400;margin-left:8px">(本次会话)</span></h2>
     <div class="log-box" id="logBox"><div style="color:#9ca3af">等待操作...</div></div>
+  </div>
+
+  <div class="section">
+    <h2>📜 历史记录 <span style="font-size:12px;color:#9ca3af;font-weight:400;margin-left:8px">(持久化保存)</span></h2>
+    <div class="log-box" id="historyBox" style="max-height:400px"><div style="color:#9ca3af">加载中...</div></div>
   </div>
 </div>
 
@@ -280,11 +350,9 @@ async function refresh(){
     
     let online=0,offline=0,away=0;
     agents.forEach(a=>{
-      const now=Date.now()/1000;
-      const dt=now-(a.last_seen||0);
       if(a.alive && a.net_online)online++;
-      else if(a.alive)offline++;
-      else away++;
+      else if(a.alive)away++;
+      else offline++;
     });
     
     document.getElementById("totalCnt").textContent=agents.length;
@@ -294,18 +362,15 @@ async function refresh(){
     
     if(!agents.length){
       grid.innerHTML='<div class="empty">暂无 Agent 连接，请在客户端启动 agent.py</div>';
-      return;
-    }
-    
+    } else {
     grid.innerHTML=agents.map(a=>{
-      const st=!a.alive?"away":a.net_online?"online":"offline";
-      const stText=!a.alive?"失联":a.net_online?"在线":"离线";
-      const badgeCls=!a.alive?"aw":a.net_online?"on":"off";
+      const cls=a.status_cls||"off";
+      const stMap={"on":"online","off":"offline","aw":"away"};
       return `
-      <div class="agent ${st}">
+      <div class="agent ${stMap[cls]||'offline'}">
         <div class="agent-head">
           <span class="agent-name">💻 ${a.hostname||a.agent_id}</span>
-          <span class="badge ${badgeCls}">${stText}</span>
+          <span class="badge ${cls}">${a.status_text||"未知"}</span>
         </div>
         <div class="info-row"><span class="k">Agent ID</span><span class="v">${a.agent_id||"--"}</span></div>
         <div class="info-row"><span class="k">局域网 IP</span><span class="v">${a.local_ip||"--"}</span></div>
@@ -325,9 +390,9 @@ async function refresh(){
         </div>
         <div class="actions">
           <button class="btn btn-red" onclick="sendCmd('${a.agent_id}','logout')">⏏ 下线+取消无感</button>
-          <button class="btn btn-blue" onclick="sendCmd('${a.agent_id}','refresh')">� 刷新</button>
-          <button class="btn btn-orange" onclick="sendCmd('${a.agent_id}','cancel_mab')">� 取消无感</button>
-          <button class="btn" style="background:#f1f5f9;color:#64748b" onclick="toggleToken('${a.agent_id}')">� Token</button>
+          <button class="btn btn-blue" onclick="sendCmd('${a.agent_id}','refresh')">🔄 刷新</button>
+          <button class="btn btn-orange" onclick="sendCmd('${a.agent_id}','cancel_mab')">🚫 取消无感</button>
+          <button class="btn" style="background:#f1f5f9;color:#64748b" onclick="toggleToken('${a.agent_id}')">🔑 Token</button>
         </div>
         <div class="actions" style="margin-top:6px">
           <span style="font-size:12px;color:#6b7280;line-height:30px">⏰ 重连延迟:</span>
@@ -343,16 +408,20 @@ async function refresh(){
         <div class="token-box" id="tok-${a.agent_id}">${a.user_index||"无 token"}</div>
       </div>`;
     }).join("");
+    }
     
-    // 拉取操作结果
-    const rr=await fetch(API+"/api/results");
-    const results=await rr.json();
-    results.slice(0,5).forEach(r=>{
-      // 只显示最近10秒内的新结果
-      if(Date.now()/1000-r.time<10){
-        addLog(`[${r.agent_id?.substring(0,8)}] ${r.message}`, r.success?"ok":"err");
-      }
-    });
+    // 拉取历史记录
+    const hr=await fetch(API+"/api/history?n=50");
+    const hist=await hr.json();
+    const hbox=document.getElementById("historyBox");
+    if(hist.length){
+      hbox.innerHTML=hist.map(h=>{
+        const t=new Date(h.time*1000).toLocaleString("zh-CN",{hour12:false});
+        const cls=h.success===true?"ok":h.success===false?"err":"";
+        const icon=h.success===true?"✅":h.success===false?"❌":"📌";
+        return `<div class="${cls}">${icon} [${t}] <b>${h.hostname||""}</b> ${h.action} ${h.detail?'<span style="color:#9ca3af">'+h.detail+'</span>':''}</div>`;
+      }).join("");
+    }
     
   }catch(e){console.error(e)}
 }
@@ -380,6 +449,7 @@ if __name__ == "__main__":
     print("=" * 50)
     print("  校园网远程控制面板")
     print("=" * 50)
+    _load_data()
     print(f"  ➜ http://localhost:{args.port}")
     print(f"  ➜ http://0.0.0.0:{args.port}  (局域网)")
     print("=" * 50)

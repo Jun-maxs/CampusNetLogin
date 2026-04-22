@@ -74,38 +74,59 @@ def _is_admin():
 def _run_as_admin(cmd_args):
     """以管理员权限运行命令, 返回 (成功, 输出)"""
     import subprocess
+    
+    def _quote(s):
+        """给带空格的参数加引号"""
+        return f'"{s}"' if " " in s and not s.startswith('"') else s
+    
     try:
         # 先尝试直接运行 (已有管理员权限)
+        print(f"  [ADMIN] 尝试直接运行: {cmd_args[0]} ...")
         r = subprocess.run(cmd_args, capture_output=True, text=True, timeout=15,
                           creationflags=subprocess.CREATE_NO_WINDOW)
         if r.returncode == 0:
+            print(f"  [ADMIN] 直接运行成功")
             return True, r.stdout.strip()
-        # 权限不足, 用 UAC 提权
+        print(f"  [ADMIN] 直接运行失败 (code={r.returncode}): {r.stderr.strip()[:80]}")
+        
+        # 需要 UAC 提权
         import ctypes
-        # 把命令写成 bat 临时文件, 用 ShellExecute runas
         bat_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "_admin_cmd.bat")
         result_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "_admin_result.txt")
+        # 删除旧的结果文件
+        if os.path.exists(result_path):
+            os.remove(result_path)
+        # 写 bat，参数正确引号
+        cmd_line = " ".join(_quote(a) for a in cmd_args)
         with open(bat_path, "w", encoding="gbk") as f:
             f.write("@echo off\n")
-            f.write(" ".join(cmd_args) + f' > "{result_path}" 2>&1\n')
+            f.write(f'chcp 65001 >nul 2>&1\n')
+            f.write(f'{cmd_line} > "{result_path}" 2>&1\n')
+        print(f"  [ADMIN] 请求 UAC 提权...")
         # 请求 UAC
         ret = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", "cmd.exe", f'/c "{bat_path}"', None, 0)
+            None, "runas", "cmd.exe", f'/c "{bat_path}"', None, 1)  # 1=SW_SHOWNORMAL
         if ret <= 32:
             return False, f"UAC 被拒绝 (code={ret})"
         # 等待执行完
         import time as _t
-        for _ in range(30):
+        for _ in range(60):  # 等最多30秒
             _t.sleep(0.5)
             if os.path.exists(result_path):
-                with open(result_path, "r", encoding="gbk", errors="replace") as rf:
+                _t.sleep(0.3)  # 等写完
+                with open(result_path, "r", encoding="utf-8", errors="replace") as rf:
                     output = rf.read().strip()
-                os.remove(result_path)
-                os.remove(bat_path)
+                try: os.remove(result_path)
+                except: pass
+                try: os.remove(bat_path)
+                except: pass
+                print(f"  [ADMIN] UAC 执行完毕: {output[:80]}")
                 return True, output
-        os.remove(bat_path)
-        return True, "已执行(无法获取输出)"
+        try: os.remove(bat_path)
+        except: pass
+        return True, "已执行(等待超时)"
     except Exception as e:
+        print(f"  [ADMIN] 异常: {e}")
         return False, str(e)
 
 def _task_exists():

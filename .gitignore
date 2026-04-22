@@ -3,6 +3,8 @@ __pycache__/
 *.pyo
 .env
 agent_config.json
+server_agents.json
+server_history.json
 start_agent.vbs
 _admin_cmd.bat
 _admin_result.txt
