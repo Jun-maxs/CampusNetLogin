@@ -317,7 +317,7 @@ async function refresh(){
         <div class="info-row"><span class="k">运行时间</span><span class="v">${a.uptime||"--"}</span></div>
         <div class="info-row"><span class="k">自动重连</span><span class="v">${a.reconnect_status||"禁用"}</span></div>
         <div class="autostart-row">
-          <span class="label">🚀 开机自启</span>
+          <span class="label">🚀 开机自启 <span style="font-size:11px;color:#9ca3af;font-weight:400">${a.autostart_reg?"注册表✓":"注册表✗"} | ${a.autostart_task?"计划任务✓":"计划任务✗"}</span></span>
           <label class="toggle" onclick="toggleAutostart('${a.agent_id}','${a.hostname||a.agent_id}',${!!a.autostart})">
             <input type="checkbox" ${a.autostart?"checked":""} onclick="event.preventDefault()">
             <span class="slider"></span>

@@ -61,11 +61,67 @@ def http_get(url, timeout=8):
         return None
 
 # ============ 开机自启管理 (Windows) ============
+TASK_NAME = "CampusNetAgent"
 
-def is_autostart_enabled():
-    """检查是否已设置开机自启"""
-    if platform.system() != "Windows":
+def _is_admin():
+    """检查是否有管理员权限"""
+    try:
+        import ctypes
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except:
         return False
+
+def _run_as_admin(cmd_args):
+    """以管理员权限运行命令, 返回 (成功, 输出)"""
+    import subprocess
+    try:
+        # 先尝试直接运行 (已有管理员权限)
+        r = subprocess.run(cmd_args, capture_output=True, text=True, timeout=15,
+                          creationflags=subprocess.CREATE_NO_WINDOW)
+        if r.returncode == 0:
+            return True, r.stdout.strip()
+        # 权限不足, 用 UAC 提权
+        import ctypes
+        # 把命令写成 bat 临时文件, 用 ShellExecute runas
+        bat_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "_admin_cmd.bat")
+        result_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "_admin_result.txt")
+        with open(bat_path, "w", encoding="gbk") as f:
+            f.write("@echo off\n")
+            f.write(" ".join(cmd_args) + f' > "{result_path}" 2>&1\n')
+        # 请求 UAC
+        ret = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", "cmd.exe", f'/c "{bat_path}"', None, 0)
+        if ret <= 32:
+            return False, f"UAC 被拒绝 (code={ret})"
+        # 等待执行完
+        import time as _t
+        for _ in range(30):
+            _t.sleep(0.5)
+            if os.path.exists(result_path):
+                with open(result_path, "r", encoding="gbk", errors="replace") as rf:
+                    output = rf.read().strip()
+                os.remove(result_path)
+                os.remove(bat_path)
+                return True, output
+        os.remove(bat_path)
+        return True, "已执行(无法获取输出)"
+    except Exception as e:
+        return False, str(e)
+
+def _task_exists():
+    """检查计划任务是否存在"""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["schtasks", "/Query", "/TN", TASK_NAME],
+            capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        return r.returncode == 0
+    except:
+        return False
+
+def _reg_exists():
+    """检查注册表自启是否存在"""
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_READ)
@@ -76,33 +132,68 @@ def is_autostart_enabled():
         except FileNotFoundError:
             winreg.CloseKey(key)
             return False
-    except Exception:
+    except:
         return False
 
+def is_autostart_enabled():
+    """检查是否已设置开机自启 (注册表 或 计划任务)"""
+    if platform.system() != "Windows":
+        return False
+    return _reg_exists() or _task_exists()
+
+def _create_vbs():
+    """创建 VBS 静默启动脚本"""
+    vbs_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "start_agent.vbs")
+    python_exe = sys.executable
+    with open(vbs_path, "w", encoding="utf-8") as f:
+        f.write(f'Set ws = CreateObject("WScript.Shell")\n')
+        f.write(f'ws.Run """{python_exe}"" ""{AGENT_SCRIPT}""", 0, False\n')
+    return vbs_path
+
 def enable_autostart():
-    """启用开机自启 (写注册表 + 创建静默启动 VBS)"""
+    """启用开机自启 (注册表 + 计划任务双保险)"""
     if platform.system() != "Windows":
         return False, "仅支持 Windows"
+    results = []
+    vbs_path = _create_vbs()
+
+    # 方式1: 注册表 (HKCU, 不需要管理员)
     try:
         import winreg
-        # 创建 VBS 静默启动脚本 (无黑窗)
-        vbs_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "start_agent.vbs")
-        python_exe = sys.executable
-        with open(vbs_path, "w", encoding="utf-8") as f:
-            f.write(f'Set ws = CreateObject("WScript.Shell")\n')
-            f.write(f'ws.Run """{python_exe}"" ""{AGENT_SCRIPT}""", 0, False\n')
-        # 写注册表
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)
         winreg.SetValueEx(key, REG_NAME, 0, winreg.REG_SZ, f'wscript.exe "{vbs_path}"')
         winreg.CloseKey(key)
-        return True, "已启用开机自启"
+        results.append("注册表✓")
     except Exception as e:
-        return False, f"启用失败: {e}"
+        results.append(f"注册表✗({e})")
+
+    # 方式2: 计划任务 (需要管理员, 安全软件难拦截)
+    python_exe = sys.executable
+    # schtasks 创建开机登录时运行的任务
+    cmd = [
+        "schtasks", "/Create", "/F",
+        "/TN", TASK_NAME,
+        "/TR", f'wscript.exe "{vbs_path}"',
+        "/SC", "ONLOGON",
+        "/RL", "HIGHEST",
+        "/DELAY", "0000:10",  # 登录后延迟10秒启动
+    ]
+    ok, out = _run_as_admin(cmd)
+    if ok and ("成功" in out or "SUCCESS" in out.upper() or "已执行" in out):
+        results.append("计划任务✓")
+    else:
+        results.append(f"计划任务✗({out[:50]})")
+
+    success = any("✓" in r for r in results)
+    return success, "已启用: " + " | ".join(results)
 
 def disable_autostart():
-    """禁用开机自启 (删注册表项)"""
+    """禁用开机自启 (清除注册表 + 计划任务)"""
     if platform.system() != "Windows":
         return False, "仅支持 Windows"
+    results = []
+
+    # 清注册表
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)
@@ -111,13 +202,25 @@ def disable_autostart():
         except FileNotFoundError:
             pass
         winreg.CloseKey(key)
-        # 清理 VBS
-        vbs_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "start_agent.vbs")
-        if os.path.exists(vbs_path):
-            os.remove(vbs_path)
-        return True, "已禁用开机自启"
+        results.append("注册表✓")
     except Exception as e:
-        return False, f"禁用失败: {e}"
+        results.append(f"注册表✗({e})")
+
+    # 删计划任务
+    cmd = ["schtasks", "/Delete", "/TN", TASK_NAME, "/F"]
+    ok, out = _run_as_admin(cmd)
+    if ok:
+        results.append("计划任务✓")
+    else:
+        results.append(f"计划任务✗({out[:50]})")
+
+    # 清理 VBS
+    vbs_path = os.path.join(os.path.dirname(AGENT_SCRIPT), "start_agent.vbs")
+    if os.path.exists(vbs_path):
+        os.remove(vbs_path)
+
+    success = any("✓" in r for r in results)
+    return success, "已禁用: " + " | ".join(results)
 
 # ============ 配置管理 ============
 
@@ -374,6 +477,8 @@ class Agent:
             "net_message": msg,
             "uptime": self.get_uptime(),
             "autostart": is_autostart_enabled(),
+            "autostart_reg": _reg_exists(),
+            "autostart_task": _task_exists(),
             "reconnect_delay": self.reconnect_delay,
             "reconnect_status": rc_status,
             "version": "1.0",
