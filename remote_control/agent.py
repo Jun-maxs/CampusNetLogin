@@ -147,33 +147,47 @@ class CampusNet:
 
     def check_online(self):
         """检测是否在线, 返回 (online, campus_ip, user_index, message)"""
+        import re
         try:
-            url = f"{self.base_url}/eportal/InterFace.do?method=getOnlineUserInfo"
-            body = json.dumps({}).encode()
-            req = urllib.request.Request(url, data=b"userIndex=", method="POST")
-            req.add_header("Content-Type", "application/x-www-form-urlencoded")
-            
-            # 先获取重定向页面检测
+            # 1. 尝试从 Portal 重定向页提取 userIndex
             test_url = f"{self.base_url}/eportal/redirectortos498.portal"
             try:
                 resp_text = http_get(test_url, timeout=5)
                 if resp_text and "Portal" in resp_text:
-                    # 尝试从页面提取 userIndex
-                    import re
                     m = re.search(r'userIndex=([a-f0-9]+)', resp_text)
                     if m:
                         self.user_index = m.group(1)
-                        return True, get_local_ip(), self.user_index, "已在线"
             except:
                 pass
-            
-            # 尝试检测网络连通性
+
+            # 2. 用 userIndex 获取完整用户信息
+            if self.user_index:
+                try:
+                    info_url = f"{self.base_url}/eportal/InterFace.do?method=getOnlineUserInfo"
+                    data = urllib.parse.urlencode({"userIndex": self.user_index}).encode()
+                    req = urllib.request.Request(info_url, data=data, method="POST")
+                    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        text = resp.read().decode("utf-8")
+                        info = json.loads(text)
+                        if info.get("result") == "success":
+                            name = info.get("userName", "")
+                            if name and not self.username:
+                                self.username = name
+                            return True, get_local_ip(), self.user_index, f"已认证: {name}"
+                        else:
+                            # userIndex 失效
+                            self.user_index = ""
+                except:
+                    pass
+
+            # 3. 检测网络连通性
             try:
                 urllib.request.urlopen("http://www.baidu.com", timeout=3)
-                return True, get_local_ip(), self.user_index, "网络可用"
+                return True, get_local_ip(), self.user_index, "网络可用(无token)"
             except:
                 return False, get_local_ip(), "", "网络不可用"
-                
+
         except Exception as e:
             return False, get_local_ip(), "", str(e)
 
