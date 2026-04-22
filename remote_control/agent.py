@@ -8,7 +8,7 @@ import json, time, os, sys, socket, uuid, hashlib, platform, traceback
 import urllib.request, urllib.parse, urllib.error
 
 # ============ 配置 ============
-DEFAULT_SERVER = "http://localhost:9090"  # 控制面板地址
+DEFAULT_SERVER = "https://yuanai.best/gyk"  # 控制面板地址
 PORTAL_IP = "10.228.9.7"
 HEARTBEAT_INTERVAL = 5  # 心跳间隔(秒)
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_config.json")
@@ -802,6 +802,117 @@ class Agent:
             time.sleep(HEARTBEAT_INTERVAL)
 
 
+# ============ 首次配置向导 (GUI) ============
+
+def _first_run_setup():
+    """首次运行时弹出配置窗口, 返回 {server, username, password, portal, autostart, protect}"""
+    cfg = load_config()
+    # 如果已有服务器配置，跳过
+    if cfg.get("server") and cfg["server"] != DEFAULT_SERVER:
+        return cfg
+    
+    try:
+        import tkinter as tk
+        from tkinter import ttk, messagebox
+    except ImportError:
+        # 无 GUI，走命令行
+        print("\n" + "=" * 50)
+        print("  首次配置 - 校园网远程控制 Agent")
+        print("=" * 50)
+        server = input("  控制面板地址 (如 http://服务器IP:9090): ").strip()
+        if not server:
+            server = DEFAULT_SERVER
+        if not server.startswith("http"):
+            server = f"http://{server}"
+        if ":" not in server.split("//")[1]:
+            server += ":9090"
+        cfg["server"] = server
+        save_config(cfg)
+        return cfg
+
+    result = {}
+    done = [False]
+
+    root = tk.Tk()
+    root.title("校园网 Agent - 首次配置")
+    root.geometry("420x380")
+    root.resizable(False, False)
+    # 居中
+    root.update_idletasks()
+    x = (root.winfo_screenwidth() - 420) // 2
+    y = (root.winfo_screenheight() - 380) // 2
+    root.geometry(f"+{x}+{y}")
+
+    style = ttk.Style()
+    style.configure("Title.TLabel", font=("Segoe UI", 14, "bold"))
+    style.configure("Sub.TLabel", font=("Segoe UI", 9), foreground="#666")
+
+    frame = ttk.Frame(root, padding=20)
+    frame.pack(fill="both", expand=True)
+
+    ttk.Label(frame, text="🌐 校园网远程控制 Agent", style="Title.TLabel").pack(anchor="w")
+    ttk.Label(frame, text="首次运行，请配置连接信息", style="Sub.TLabel").pack(anchor="w", pady=(0, 15))
+
+    # 服务器地址 (必填)
+    ttk.Label(frame, text="控制面板地址 *").pack(anchor="w")
+    sv_var = tk.StringVar(value=cfg.get("server", ""))
+    sv_entry = ttk.Entry(frame, textvariable=sv_var, width=45)
+    sv_entry.pack(fill="x", pady=(0, 4))
+    ttk.Label(frame, text="例: http://你的服务器IP:9090", style="Sub.TLabel").pack(anchor="w", pady=(0, 10))
+
+    # 校园网账号 (选填)
+    ttk.Label(frame, text="校园网账号 (选填，后续可在面板设置)").pack(anchor="w")
+    user_var = tk.StringVar(value=cfg.get("username", ""))
+    ttk.Entry(frame, textvariable=user_var, width=45).pack(fill="x", pady=(0, 8))
+
+    # 校园网密码 (选填)
+    ttk.Label(frame, text="校园网密码 (选填)").pack(anchor="w")
+    pwd_var = tk.StringVar(value=cfg.get("password", ""))
+    ttk.Entry(frame, textvariable=pwd_var, width=45, show="●").pack(fill="x", pady=(0, 10))
+
+    # 选项
+    autostart_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(frame, text="开机自动启动", variable=autostart_var).pack(anchor="w")
+    protect_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(frame, text="启用文件防护 + Defender 白名单", variable=protect_var).pack(anchor="w", pady=(0, 12))
+
+    def on_save():
+        server = sv_var.get().strip()
+        if not server:
+            messagebox.showwarning("提示", "请填写控制面板地址！")
+            return
+        if not server.startswith("http"):
+            server = f"http://{server}"
+        if ":" not in server.split("//")[1]:
+            server += ":9090"
+        result["server"] = server
+        result["username"] = user_var.get().strip()
+        result["password"] = pwd_var.get().strip()
+        result["autostart"] = autostart_var.get()
+        result["protect"] = protect_var.get()
+        # 保存
+        cfg.update(result)
+        save_config(cfg)
+        done[0] = True
+        root.destroy()
+
+    def on_cancel():
+        root.destroy()
+
+    btn_frame = ttk.Frame(frame)
+    btn_frame.pack(fill="x")
+    ttk.Button(btn_frame, text="保存并启动", command=on_save).pack(side="right", padx=(8, 0))
+    ttk.Button(btn_frame, text="取消", command=on_cancel).pack(side="right")
+
+    root.protocol("WM_DELETE_WINDOW", on_cancel)
+    sv_entry.focus()
+    root.mainloop()
+
+    if not done[0]:
+        print("  配置取消，退出")
+        sys.exit(0)
+    return result
+
 # ============ 入口 ============
 
 if __name__ == "__main__":
@@ -815,7 +926,22 @@ if __name__ == "__main__":
     parser.add_argument("--no-autostart", action="store_true", help="禁用开机自启")
     parser.add_argument("--protect", action="store_true", help="启用文件保护+Defender白名单")
     parser.add_argument("--no-watchdog", action="store_true", help="禁用看门狗")
+    parser.add_argument("--setup", action="store_true", help="强制打开配置向导")
     args = parser.parse_args()
+
+    # 首次运行或 --setup: 打开配置向导
+    cfg = load_config()
+    need_setup = args.setup or (not args.server and not cfg.get("server"))
+    if need_setup:
+        setup_result = _first_run_setup()
+        if setup_result.get("autostart"):
+            ok, msg = enable_autostart()
+            print(f"  {'✓' if ok else '✗'} {msg}")
+        if setup_result.get("protect"):
+            ok, msg = protect_files()
+            print(f"  {'✓' if ok else '✗'} {msg}")
+            ok, msg = add_defender_exclusion()
+            print(f"  {'✓' if ok else '✗'} {msg}")
 
     if args.autostart:
         ok, msg = enable_autostart()

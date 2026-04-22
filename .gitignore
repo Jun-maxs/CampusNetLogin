@@ -16,5 +16,7 @@ mobile_config.json
 *.egg-info/
 dist/
 build/
+*.spec
+remote_control/build/
 mobile_app/apk_output/
 mobile_app/tmp_log/
