@@ -1,0 +1,4 @@
+# Server 依赖
+flask>=2.0
+
+# Agent 无额外依赖 (仅用 Python 标准库)

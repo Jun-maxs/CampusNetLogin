@@ -1,0 +1,15 @@
+# Buildozer
+.buildozer/
+bin/
+__pycache__/
+*.pyc
+apk_output/
+tmp_log/
+
+# Config (contains credentials)
+mobile_app_config.json
+mobile_config.json
+
+# OS
+.DS_Store
+Thumbs.db

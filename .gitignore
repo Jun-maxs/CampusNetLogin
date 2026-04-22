@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+agent_config.json
+mobile_config.json
+*.log
+.idea/
+.vscode/
+*.egg-info/
+dist/
+build/
+mobile_app/apk_output/
+mobile_app/tmp_log/
