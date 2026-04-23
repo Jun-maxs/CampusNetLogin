@@ -243,6 +243,50 @@ def download_file(filename):
     from flask import send_from_directory
     return send_from_directory(UPLOAD_DIR, filename)
 
+@app.route("/api/versions")
+def get_versions():
+    """获取可用版本列表 (从 git log 提取)"""
+    import subprocess
+    versions = []
+    try:
+        r = subprocess.run(
+            ["git", "log", "--oneline", "-20"],
+            capture_output=True, text=True, timeout=5,
+            cwd=DATA_DIR)
+        if r.returncode == 0:
+            import re
+            for line in r.stdout.strip().split("\n"):
+                if not line.strip():
+                    continue
+                sha = line.split()[0]
+                msg = line[len(sha):].strip()
+                # 尝试提取版本号
+                ver_match = re.search(r'v(\d+\.\d+(?:\.\d+)?)', msg)
+                ver = ver_match.group(1) if ver_match else ""
+                versions.append({"sha": sha, "msg": msg, "version": ver})
+    except: pass
+    # 当前 agent 版本
+    current = ""
+    try:
+        with open(os.path.join(DATA_DIR, "agent.py"), "r", encoding="utf-8") as f:
+            for line in f:
+                if "AGENT_VERSION" in line and "=" in line:
+                    current = line.split("=")[1].strip().strip('"').strip("'").split("#")[0].strip().strip('"').strip("'")
+                    break
+    except: pass
+    # 已上传 exe 信息
+    exe_path = os.path.join(UPLOAD_DIR, "CampusNetAgent.exe")
+    has_exe = os.path.exists(exe_path)
+    exe_size = round(os.path.getsize(exe_path) / 1024 / 1024, 1) if has_exe else 0
+    exe_time = round(os.path.getmtime(exe_path)) if has_exe else 0
+    return jsonify({
+        "versions": versions,
+        "current": current,
+        "has_exe": has_exe,
+        "exe_size_mb": exe_size,
+        "exe_time": exe_time,
+    })
+
 @app.route("/api/push_update", methods=["POST"])
 def push_update():
     """向指定 Agent(s) 推送更新命令"""
@@ -259,10 +303,15 @@ def push_update():
     download_url = data.get("url", f"{scheme}://{host}/download/CampusNetAgent.exe")
     
     count = 0
+    skipped = 0
     with lock:
         targets = target if target else [aid for aid, d in agents.items()
                                          if d.get("alive") and (time.time() - d.get("last_seen", 0)) < 30]
         for aid in targets:
+            # 跳过已经是目标版本的 Agent
+            if version and agents.get(aid, {}).get("version") == version:
+                skipped += 1
+                continue
             cid = str(uuid.uuid4())[:8]
             commands.setdefault(aid, []).append({
                 "id": cid,
@@ -271,8 +320,8 @@ def push_update():
                 "time": time.time(),
             })
             count += 1
-        _add_history("server", f"推送更新 v{version}", f"目标: {count} 个Agent")
-    return jsonify({"ok": True, "count": count})
+        _add_history("server", f"推送更新 v{version}", f"推送: {count} 个, 跳过: {skipped} 个(已是最新)")
+    return jsonify({"ok": True, "count": count, "skipped": skipped})
 
 # ============ Web 面板 ============
 
@@ -456,7 +505,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC
   </div>
   <div class="top-actions">
     <span class="clock" id="clock"></span>
-    <button class="btn-ghost-top" onclick="uploadAndPushAll()">📦 上传 &amp; 全量推送</button>
+    <button class="btn-ghost-top" onclick="openBatchUpdate()">📦 批量推送更新</button>
   </div>
 </header>
 
@@ -659,9 +708,24 @@ function deleteAgent(agentId,hostname){
   pendingAction={agentId,action:'__delete__'};
   openModal('❌ 删除设备','设备: <b>'+esc(hostname)+'</b><br><br><label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="blockCheck" checked> 同时拉黑（禁止重连）</label>');
 }
-function pushUpdateSingle(agentId,hostname,curVer){
+async function pushUpdateSingle(agentId,hostname,curVer){
   pendingAction={agentId,action:'__push_update__'};
-  openModal('📦 推送更新','设备: <b>'+esc(hostname)+'</b><br>当前: <b>v'+(curVer||'?')+'</b><br><br><label class="mdl-label">新版本号:</label><input id="updateVer" type="text" placeholder="如 1.6" class="mdl-input"><br><label class="mdl-label" style="display:block;margin-top:10px">自定义URL (可选):</label><input id="updateUrl" type="text" placeholder="留空用服务器托管exe" class="mdl-input">');
+  let verHtml='<input id="updateVer" type="text" placeholder="如 1.6" class="mdl-input">';
+  try{
+    const r=await fetch(API+'/api/versions');const d=await r.json();
+    if(d.current){
+      verHtml='<select id="updateVer" class="mdl-select">';
+      verHtml+='<option value="'+esc(d.current)+'" selected>v'+esc(d.current)+' (最新)</option>';
+      const seen=new Set([d.current]);
+      d.versions.forEach(v=>{if(v.version&&!seen.has(v.version)){seen.add(v.version);verHtml+='<option value="'+esc(v.version)+'">v'+esc(v.version)+' - '+esc(v.msg.substring(0,40))+'</option>';}});
+      verHtml+='<option value="__custom__">✏️ 自定义版本号...</option></select>';
+      verHtml+='<input id="updateVerCustom" type="text" placeholder="输入自定义版本号" class="mdl-input" style="display:none;margin-top:6px">';
+      if(d.has_exe)verHtml+='<div style="font-size:11px;color:var(--sub);margin-top:4px">📦 已有exe: '+d.exe_size_mb+'MB, 上传于 '+new Date(d.exe_time*1000).toLocaleString("zh-CN",{hour12:false})+'</div>';
+      else verHtml+='<div style="font-size:11px;color:var(--red-text);margin-top:4px">⚠️ 未上传exe, 请先上传</div>';
+    }
+  }catch(e){}
+  openModal('📦 推送更新','设备: <b>'+esc(hostname)+'</b><br>当前版本: <b>v'+(curVer||'?')+'</b><br><br><label class="mdl-label">目标版本:</label>'+verHtml+'<br><label class="mdl-label" style="display:block;margin-top:10px">自定义URL (可选):</label><input id="updateUrl" type="text" placeholder="留空用服务器托管exe" class="mdl-input">');
+  setTimeout(()=>{const s=document.getElementById('updateVer');if(s&&s.tagName==='SELECT'){s.onchange=()=>{const ci=document.getElementById('updateVerCustom');if(ci)ci.style.display=s.value==='__custom__'?'block':'none';};}},50);
 }
 async function confirmAction(){
   if(!pendingAction){closeModal();return;}
@@ -670,23 +734,60 @@ async function confirmAction(){
   else if(action==='set_bandwidth'){const s=document.getElementById("bwRate");if(s)params.rate_kbps=parseInt(s.value);}
   else if(action==='set_dns'){const s=document.getElementById("dnsSelect");if(s){if(s.value==='custom'){const i=document.getElementById("dnsCustom");params.primary=i?i.value.trim():'127.0.0.1';}else params.primary=s.value;}}
   let _pv='',_pu='',_bc=true;
-  if(action==='__push_update__'){_pv=document.getElementById('updateVer')?.value?.trim()||'';_pu=document.getElementById('updateUrl')?.value?.trim()||'';}
+  if(action==='__push_update__'){_pv=document.getElementById('updateVer')?.value?.trim()||'';if(_pv==='__custom__')_pv=document.getElementById('updateVerCustom')?.value?.trim()||'';_pu=document.getElementById('updateUrl')?.value?.trim()||'';}
   if(action==='__delete__')_bc=document.getElementById('blockCheck')?.checked??true;
   closeModal();
   if(action==='__delete__'){await doDelete(agentId,_bc);}
   else if(action==='__push_update__'){
-    try{const r=await fetch(API+'/api/push_update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agents:[agentId],version:_pv,url:_pu||undefined})});const j=await r.json();if(j.ok)addLog('推送更新 v'+_pv+' → '+agentId.substring(0,8),'ok');else addLog('推送失败: '+j.error,'err');}catch(e){addLog('推送错误: '+e,'err');}
+    try{const r=await fetch(API+'/api/push_update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agents:[agentId],version:_pv,url:_pu||undefined})});const j=await r.json();if(j.ok)addLog('推送v'+_pv+' → '+agentId.substring(0,8)+(j.skipped?' (跳过'+j.skipped+'个已是最新)':''),'ok');else addLog('推送失败: '+j.error,'err');}catch(e){addLog('推送错误: '+e,'err');}
+  }else if(action==='__batch_update__'){
+    let bv=document.getElementById('batchVer')?.value?.trim()||'';if(bv==='__custom__')bv=document.getElementById('batchVerCustom')?.value?.trim()||'';
+    const checked=[...document.querySelectorAll('.batch-dev:checked')].map(c=>c.value);
+    if(!bv){addLog('请选择版本号','err');return;}
+    if(!checked.length){addLog('请选择至少一个设备','err');return;}
+    try{const r=await fetch(API+'/api/push_update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agents:checked,version:bv})});const j=await r.json();if(j.ok)addLog('批量推送v'+bv+': 推送'+j.count+'个'+(j.skipped?', 跳过'+j.skipped+'个已是最新':''),'ok');else addLog('推送失败: '+j.error,'err');}catch(e){addLog('推送错误: '+e,'err');}
   }else{await sendCmd(agentId,action,params);}
 }
 async function doDelete(agentId,block){
   addLog('删除: '+agentId.substring(0,8)+(block?' +拉黑':''));
   try{const r=await fetch(API+"/api/delete_agent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({agent_id:agentId,block})});const j=await r.json();if(j.ok){addLog("删除成功","ok");closeDrawer();refresh();}else addLog('删除失败: '+j.error,'err');}catch(e){addLog('网络错误: '+e,'err');}
 }
-async function uploadAndPushAll(){
+async function openBatchUpdate(){
+  let verHtml='<input id="batchVer" type="text" placeholder="如 1.6" class="mdl-input">';
+  let exeInfo='';
+  try{
+    const r=await fetch(API+'/api/versions');const d=await r.json();
+    if(d.current){
+      verHtml='<select id="batchVer" class="mdl-select">';
+      verHtml+='<option value="'+esc(d.current)+'" selected>v'+esc(d.current)+' (最新)</option>';
+      const seen=new Set([d.current]);
+      d.versions.forEach(v=>{if(v.version&&!seen.has(v.version)){seen.add(v.version);verHtml+='<option value="'+esc(v.version)+'">v'+esc(v.version)+' - '+esc(v.msg.substring(0,40))+'</option>';}});
+      verHtml+='<option value="__custom__">✏️ 自定义版本号...</option></select>';
+      verHtml+='<input id="batchVerCustom" type="text" placeholder="输入自定义版本号" class="mdl-input" style="display:none;margin-top:6px">';
+    }
+    if(d.has_exe)exeInfo='<div style="font-size:11px;color:var(--sub);margin-top:4px">📦 已有exe: '+d.exe_size_mb+'MB, 上传于 '+new Date(d.exe_time*1000).toLocaleString("zh-CN",{hour12:false})+'</div>';
+    else exeInfo='<div style="font-size:11px;color:var(--red-text);margin-top:4px">⚠️ 未上传exe</div>';
+  }catch(e){}
+  // 构建设备选择列表
+  let devHtml='<div style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:6px;margin-top:6px">';
+  devHtml+='<label style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border);margin-bottom:4px;font-weight:600"><input type="checkbox" id="batchSelectAll" checked onchange="document.querySelectorAll(\'.batch-dev\').forEach(c=>c.checked=this.checked)"> 全选/取消全选</label>';
+  _agents.forEach(a=>{
+    const online=a.alive;
+    const ver=a.version||'?';
+    devHtml+='<label style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:13px"><input type="checkbox" class="batch-dev" value="'+esc(a.agent_id)+'" '+(online?'checked':'')+' '+(online?'':'disabled')+'><span style="'+(online?'':'color:var(--sub)')+'">'+esc(a.hostname||a.agent_id)+' <span style="font-size:11px;color:var(--sub)">(v'+esc(ver)+(online?', 在线':' 离线')+')</span></span></label>';
+  });
+  devHtml+='</div>';
+  pendingAction={agentId:null,action:'__batch_update__'};
+  openModal('📦 批量推送更新','<label class="mdl-label">目标版本:</label>'+verHtml+exeInfo+'<div style="margin-top:12px"><label class="mdl-label">推送目标:</label>'+devHtml+'</div><div style="margin-top:10px"><button class="btn btn-blue" style="font-size:12px;padding:4px 10px" onclick="batchUploadExe()">📤 上传新exe</button></div>');
+  setTimeout(()=>{
+    const s=document.getElementById('batchVer');
+    if(s&&s.tagName==='SELECT'){s.onchange=()=>{const ci=document.getElementById('batchVerCustom');if(ci)ci.style.display=s.value==='__custom__'?'block':'none';};}
+  },50);
+}
+function batchUploadExe(){
   const input=document.createElement('input');input.type='file';input.accept='.exe';
-  input.onchange=async()=>{const file=input.files[0];if(!file)return;const ver=prompt('新版本号:','');if(ver===null)return;addLog('上传: '+file.name);const fd=new FormData();fd.append('file',file);
+  input.onchange=async()=>{const file=input.files[0];if(!file)return;addLog('上传: '+file.name);const fd=new FormData();fd.append('file',file);
     try{const r=await fetch(API+'/api/upload_exe',{method:'POST',body:fd});const j=await r.json();if(!j.ok){addLog('上传失败: '+j.error,'err');return;}addLog('上传成功: '+j.size_mb+'MB','ok');
-      if(confirm('上传成功! 推送v'+ver+'到所有在线Agent?')){const r2=await fetch(API+'/api/push_update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:ver})});const j2=await r2.json();if(j2.ok)addLog('推送到'+j2.count+'个Agent','ok');else addLog('推送失败: '+j2.error,'err');}
     }catch(e){addLog('上传错误: '+e,'err');}};input.click();
 }
 
