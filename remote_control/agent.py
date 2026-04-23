@@ -4,7 +4,7 @@
 功能: 自动上报状态、接收远程命令(下线/登录/刷新)
 安装后自动运行，保持与控制面板的连接
 """
-import json, time, os, sys, socket, uuid, hashlib, platform, traceback, base64
+import json, time, os, sys, socket, uuid, hashlib, platform, traceback, base64, re
 import urllib.request, urllib.parse, urllib.error
 
 # ============ 配置 ============
@@ -12,6 +12,7 @@ import urllib.request, urllib.parse, urllib.error
 _S = b'aHR0cHM6Ly95dWFuYWkuYmVzdC9neWs='  # https://yuanai.best/gyk
 DEFAULT_SERVER = base64.b64decode(_S).decode()
 PORTAL_IP = "10.228.9.7"
+AGENT_VERSION = "1.5"  # 版本号, 每次更新递增
 # API 鉴权密钥 (服务器和客户端必须一致)
 API_SECRET = "CampusNet@2026#Secure"
 HEARTBEAT_INTERVAL = 5  # 心跳间隔(秒)
@@ -688,40 +689,160 @@ def reset_dns():
 def get_dns_status():
     """查询当前 DNS 设置, 返回 (is_hijacked: bool, dns_servers: str)
     
-    检测方法: 查询活动网卡的 DNS 来源, 如果是手动设置(Static)则标记为已篡改
+    使用 netsh 检测默认网关所在网卡的 DNS 配置来源 (Static vs DHCP)
+    排除虚拟网卡 (Docker/VMware/Hyper-V 等)
     """
     if platform.system() != "Windows":
         return False, ""
     import subprocess
     try:
-        # 查询活动网卡上 DNS 是否手动设置 (非 DHCP 分配)
+        # 用 netsh 获取所有接口的 DNS 配置, 含来源(DHCP/Static)
         r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "$a=Get-NetAdapter|Where-Object{$_.Status -eq 'Up'}|Select-Object -First 1;"
-             "if($a){$cfg=Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4;"
-             "$ip=Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue;"
-             "if($cfg.ServerAddresses){$cfg.ServerAddresses -join ','}else{'DHCP'}}"
-             "else{'NONE'}"],
+            ["netsh", "interface", "ip", "show", "dns"],
             capture_output=True, text=True, timeout=10,
             creationflags=subprocess.CREATE_NO_WINDOW)
-        out = r.stdout.strip()
-        if out in ("DHCP", "NONE", ""):
-            return False, "DHCP(自动)"
-        # 有 DNS 地址, 进一步检测是否是通过 DHCP 获取的
-        # 方式: 检查接口的 DNS 是否是手动配置的 (ServerAddresses 非空 = 手动)
+        output = r.stdout
+        
+        # 同时获取有默认网关的物理网卡名 (排除虚拟网卡)
         r2 = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             "$a=Get-NetAdapter|Where-Object{$_.Status -eq 'Up'}|Select-Object -First 1;"
-             "if($a){(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4).ServerAddresses.Count}"
-             "else{0}"],
+             "$route=Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue|Select-Object -First 1;"
+             "if($route){(Get-NetAdapter -InterfaceIndex $route.InterfaceIndex).Name}"],
             capture_output=True, text=True, timeout=10,
             creationflags=subprocess.CREATE_NO_WINDOW)
-        count = int(r2.stdout.strip() or "0")
-        if count > 0:
-            return True, out
+        primary_adapter = r2.stdout.strip()
+        
+        if not primary_adapter:
+            return False, "未找到主网卡"
+        
+        # 解析 netsh 输出, 找到主网卡的 DNS 配置段
+        lines = output.splitlines()
+        in_section = False
+        dns_servers = []
+        is_static = False
+        
+        for line in lines:
+            # netsh 输出格式: "接口 "以太网" 的配置" 或 "Configuration for interface "Ethernet""
+            if '接口' in line or 'interface' in line.lower():
+                if primary_adapter in line:
+                    in_section = True
+                    dns_servers = []
+                    is_static = False
+                else:
+                    if in_section:
+                        break  # 已经过了目标段
+                    in_section = False
+            elif in_section:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # 检测来源: "静态配置" / "Statically Configured" / "通过 DHCP" / "DHCP"
+                if '静态' in stripped or 'Static' in stripped.lower():
+                    is_static = True
+                elif 'DHCP' in stripped:
+                    is_static = False
+                # 提取 DNS IP (行中含IP地址的)
+                ips = re.findall(r'\d+\.\d+\.\d+\.\d+', stripped)
+                dns_servers.extend(ips)
+        
+        if dns_servers:
+            dns_str = ",".join(dns_servers)
+            return is_static, dns_str
         return False, "DHCP(自动)"
     except:
         return False, "查询失败"
+
+# ============ 远程自更新 ============
+
+def _cleanup_old_exe():
+    """启动时清理上次更新留下的旧版本文件"""
+    for suffix in ("_old.exe", "_new.exe", ".old.exe", ".update.exe"):
+        old = os.path.join(AGENT_DIR, f"CampusNetAgent{suffix}")
+        try:
+            if os.path.exists(old):
+                os.remove(old)
+                print(f"  [更新] 已清理旧文件: {os.path.basename(old)}")
+        except:
+            pass
+
+def self_update(download_url, target_version=""):
+    """静默自更新: 下载→重命名→替换→重启, 全过程无弹窗
+    
+    步骤:
+    1. 下载新 exe 到 CampusNetAgent_new.exe
+    2. 重命名当前 exe → CampusNetAgent_old.exe (Windows允许重命名运行中exe)
+    3. 重命名新 exe → CampusNetAgent.exe
+    4. 启动新进程 (DETACHED_PROCESS, 不继承控制台)
+    5. 退出当前进程
+    """
+    import subprocess, shutil
+    
+    exe_name = os.path.basename(AGENT_EXE)  # CampusNetAgent.exe
+    new_exe = os.path.join(AGENT_DIR, "CampusNetAgent_new.exe")
+    old_exe = os.path.join(AGENT_DIR, "CampusNetAgent_old.exe")
+    
+    # 1. 下载新版本
+    print(f"  [更新] 开始下载: {download_url}")
+    try:
+        req = urllib.request.Request(download_url)
+        req.add_header("User-Agent", "CampusNetAgent-Updater")
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = resp.read()
+        if len(data) < 100000:  # 小于100KB肯定不对
+            return False, f"下载文件过小({len(data)}B), 可能不是有效exe"
+        with open(new_exe, "wb") as f:
+            f.write(data)
+        print(f"  [更新] 下载完成: {len(data)/(1024*1024):.1f}MB")
+    except Exception as e:
+        return False, f"下载失败: {e}"
+    
+    # 2. 清理旧的old文件
+    try:
+        if os.path.exists(old_exe):
+            os.remove(old_exe)
+    except:
+        pass
+    
+    # 3. 重命名当前 exe → old (Windows允许重命名正在运行的exe)
+    if getattr(sys, 'frozen', False):
+        try:
+            os.rename(AGENT_EXE, old_exe)
+            print(f"  [更新] 当前exe已重命名为 {os.path.basename(old_exe)}")
+        except Exception as e:
+            return False, f"重命名当前exe失败: {e}"
+        
+        # 4. 重命名新 exe → 原名
+        try:
+            os.rename(new_exe, AGENT_EXE)
+            print(f"  [更新] 新版本已就位: {exe_name}")
+        except Exception as e:
+            # 回滚: 把旧的改回来
+            try:
+                os.rename(old_exe, AGENT_EXE)
+            except:
+                pass
+            return False, f"替换exe失败: {e}"
+        
+        # 5. 启动新进程 (完全独立, 不继承父进程)
+        try:
+            # 传递当前的命令行参数
+            cmd_args = [AGENT_EXE] + sys.argv[1:]
+            subprocess.Popen(
+                cmd_args,
+                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+                close_fds=True,
+                cwd=AGENT_DIR
+            )
+            print(f"  [更新] 新版本已启动, 即将退出当前进程")
+        except Exception as e:
+            return False, f"启动新版本失败: {e}"
+        
+        msg = f"更新成功: v{AGENT_VERSION}→v{target_version or '?'}"
+        return True, msg
+    else:
+        # 开发环境: 只下载, 不替换
+        os.rename(new_exe, os.path.join(AGENT_DIR, f"CampusNetAgent_v{target_version}.exe"))
+        return True, f"开发模式: 新版本已下载, 不自动替换"
 
 def _start_watchdog():
     """启动看门狗: 创建一个监控脚本, 主进程被杀后自动重启
@@ -1153,7 +1274,7 @@ class Agent:
             "bandwidth_limit": bw_limit,       # 0=无限速, >0 = KB/s
             "dns_hijacked": dns_hijacked,      # bool
             "dns_servers": dns_servers,         # 当前DNS字符串
-            "version": "1.4",
+            "version": AGENT_VERSION,
         }
 
     def heartbeat(self):
@@ -1275,6 +1396,23 @@ class Agent:
             elif command == "reset_dns":
                 success, message = reset_dns()
 
+            elif command == "self_update":
+                url = params.get("url", "")
+                ver = params.get("version", "")
+                if not url:
+                    message = "缺少下载URL"
+                else:
+                    success, message = self_update(url, ver)
+                    if success and getattr(sys, 'frozen', False):
+                        # 回报结果后退出, 新进程已启动
+                        print(f"  [RES] {command}: ✓ {message}")
+                        http_post(f"{self.server_url}/api/report", {
+                            "agent_id": self.agent_id, "cmd_id": cmd_id,
+                            "success": True, "message": message,
+                        })
+                        time.sleep(1)
+                        os._exit(0)
+
             elif command == "uninstall":
                 # 完全卸载 (仅服务器可触发)
                 success, message = full_uninstall()
@@ -1313,7 +1451,7 @@ class Agent:
     def run(self):
         """主循环"""
         print("=" * 50)
-        print("  校园网远程控制 - Agent")
+        print(f"  校园网远程控制 - Agent v{AGENT_VERSION}")
         print("=" * 50)
         print(f"  Agent ID : {self.agent_id}")
         print(f"  主机名   : {self.hostname}")
@@ -1322,6 +1460,9 @@ class Agent:
         print(f"  服务器   : {self.server_url}")
         print(f"  用户名   : {self.net.username or '(未设置)'}")
         print("=" * 50)
+        
+        # 清理上次更新留下的旧版本
+        _cleanup_old_exe()
         
         # 每次启动都刷新自启注册 (修复路径变化/被清理的情况)
         try:

