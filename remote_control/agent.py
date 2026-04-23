@@ -2334,12 +2334,14 @@ class Agent:
         try:
             if command == "logout":
                 dns_block = params.get("dns_block", False)
-                total = 6 if dns_block else 4
+                total = 6 if dns_block else 5
                 S(1, total, "接收强制下线指令" + (" (含DNS断网)" if dns_block else ""))
                 S(2, total, "执行 full_logout...")
                 r = self.net.full_logout()
                 success = r.get("result") == "success"
                 message = r.get("message", "已下线" if success else "下线失败")
+                # 检测 cancelMab 是否失败 (无感认证会导致自动重连)
+                mab_failed = "cancelMab:fail" in message or "cancelMac:fail" in message
                 S(3, total, f"登出结果: {message}", "ok" if success else "error")
                 self.force_offline = True
                 self.reconnect_at = 0
@@ -2351,12 +2353,17 @@ class Agent:
                     self.force_offline_until = 0
                     message += " | 强制离线(永久,发送unlock解锁)"
                 S(4, total, f"离线锁已设置", "ok")
-                if dns_block:
-                    S(5, total, "DNS兜底断网: 备份当前DNS → 设为127.0.0.1...")
+                # DNS断网: 手动勾选 或 cancelMab失败时自动启用 (防止无感认证重连)
+                need_dns = dns_block or (mab_failed and success)
+                if need_dns:
+                    reason = "DNS兜底断网" if dns_block else "⚠️ cancelMab失败, 自动启用DNS断网防重连"
+                    S(5, total, f"{reason}: 备份当前DNS → 设为127.0.0.1...")
                     dns_ok, dns_msg, _ = dns_disconnect(duration)
                     self._dns_blocked = True
                     message += f" | DNS: {dns_msg}"
-                    S(6, total, dns_msg, "ok" if dns_ok else "error")
+                    S(total, total, dns_msg, "ok" if dns_ok else "error")
+                else:
+                    S(5, total, "cancelMab成功, 无需DNS断网", "ok")
 
             elif command == "cancel_mab":
                 S(1, 5, "清除缓存, 准备获取 user_index")
