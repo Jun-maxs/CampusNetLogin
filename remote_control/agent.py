@@ -808,19 +808,67 @@ class CampusNet:
         except Exception as e:
             return {"result": "fail", "message": str(e)}
 
+    def _refresh_user_index(self):
+        """强制刷新 user_index (不依赖缓存, 通过 IP 查询 portal)"""
+        try:
+            # 方式1: 空 userIndex POST getOnlineUserInfo → portal 按源IP返回
+            info_url = f"{self.base_url}/eportal/InterFace.do?method=getOnlineUserInfo"
+            req = urllib.request.Request(info_url, data=b"userIndex=", method="POST")
+            req.add_header("Content-Type", "application/x-www-form-urlencoded")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                text = resp.read().decode("utf-8", errors="ignore")
+                info = json.loads(text)
+                ui = info.get("userIndex", "")
+                name = info.get("userName", "")
+                uid = info.get("userId", "")
+                if ui:
+                    self.user_index = ui
+                    if name and not self.username:
+                        self.username = name
+                    if uid and not self.username:
+                        self.username = uid
+                    print(f"  [NET] 刷新 user_index 成功: {ui[:16]}... (user={name or uid})")
+                    return True
+                else:
+                    print(f"  [NET] 刷新 user_index: portal 无返回 ({info.get('message','')})")
+        except Exception as e:
+            print(f"  [NET] 刷新 user_index 异常: {e}")
+        return False
+
     def full_logout(self):
-        """完整下线: 取消无感认证 + 注销"""
+        """完整下线: 取消无感认证 + 注销
+        
+        关键: 先刷新 user_index (可能过期或为空)
+        """
         results = []
+        # 0. 先刷新 user_index (防止过期/空值导致全部失败)
+        refreshed = self._refresh_user_index()
+        if not self.user_index:
+            return {"result": "fail",
+                    "message": f"无法获取 user_index (可能设备已离线或不在校园网内)"}
+        
         # 1. 取消无感认证 (两种方式都试)
         r1 = self.cancel_mab()
-        results.append(f"cancelMab: {r1.get('result','')}")
+        results.append(f"cancelMab:{r1.get('result','?')}")
         r2 = self.cancel_mac_by_name()
-        results.append(f"cancelMac: {r2.get('result','')}")
+        results.append(f"cancelMac:{r2.get('result','?')}")
         # 2. 注销
         r3 = self.logout()
-        results.append(f"logout: {r3.get('result','')}")
-        ok = r3.get("result") == "success"
-        return {"result": "success" if ok else "fail", "message": " | ".join(results)}
+        results.append(f"logout:{r3.get('result','?')}")
+        # 任意一个成功即视为成功 (Portal 对同一session的多次操作可能重复返回相同错误)
+        ok = (r1.get("result") == "success"
+              or r2.get("result") == "success"
+              or r3.get("result") == "success")
+        msg_parts = " | ".join(results)
+        if not ok:
+            # 附加失败详情以便诊断
+            details = []
+            if r1.get("message"): details.append(f"[Mab]{r1.get('message','')[:60]}")
+            if r2.get("message"): details.append(f"[Mac]{r2.get('message','')[:60]}")
+            if r3.get("message"): details.append(f"[Out]{r3.get('message','')[:60]}")
+            if details:
+                msg_parts += " | " + " ".join(details)
+        return {"result": "success" if ok else "fail", "message": msg_parts}
 
 # ============ Agent 主类 ============
 
