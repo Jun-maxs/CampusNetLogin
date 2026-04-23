@@ -12,7 +12,7 @@ import urllib.request, urllib.parse, urllib.error
 _S = b'aHR0cHM6Ly95dWFuYWkuYmVzdC9neWs='  # https://yuanai.best/gyk
 DEFAULT_SERVER = base64.b64decode(_S).decode()
 PORTAL_IP = "10.228.9.7"
-AGENT_VERSION = "1.56"  # 版本号, 每次更新递增
+AGENT_VERSION = "1.57"  # 版本号, 每次更新递增
 # API 鉴权密钥 (服务器和客户端必须一致)
 API_SECRET = "CampusNet@2026#Secure"
 HEARTBEAT_INTERVAL = 5  # 心跳间隔(秒)
@@ -1019,11 +1019,20 @@ def self_update(download_url, target_version="", on_step=None):
     _S = on_step or (lambda s, m, st="running": None)
     
     exe_name = os.path.basename(AGENT_EXE)
-    new_exe = os.path.join(AGENT_DIR, "CampusNetAgent_new.exe")
-    old_exe = os.path.join(AGENT_DIR, "CampusNetAgent_old.exe")
+    # 优先写入 AGENT_DIR, 写不了则回退到系统 TEMP 目录
+    import tempfile
+    _work_dir = AGENT_DIR
+    _test_file = os.path.join(_work_dir, "_write_test")
+    try:
+        with open(_test_file, "w") as f: f.write("ok")
+        os.remove(_test_file)
+    except:
+        _work_dir = tempfile.gettempdir()
+    new_exe = os.path.join(_work_dir, "CampusNetAgent_new.exe")
+    old_exe = os.path.join(_work_dir, "CampusNetAgent_old.exe")
     
     # 1. 下载新版本
-    _S(3, f"开始下载: {download_url[:60]}...")
+    _S(3, f"开始下载: {download_url[:60]}... (工作目录: {_work_dir})")
     try:
         req = urllib.request.Request(download_url)
         req.add_header("User-Agent", "CampusNetAgent-Updater")
@@ -1035,7 +1044,7 @@ def self_update(download_url, target_version="", on_step=None):
             return False, f"下载文件过小({len(data)}B), 可能不是有效exe"
         with open(new_exe, "wb") as f:
             f.write(data)
-        _S(3, f"下载完成: {size_mb:.1f}MB", "ok")
+        _S(3, f"下载完成: {size_mb:.1f}MB → {new_exe}", "ok")
     except Exception as e:
         _S(3, f"下载失败: {e}", "error")
         return False, f"下载失败: {e}"
