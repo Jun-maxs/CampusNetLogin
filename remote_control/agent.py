@@ -115,9 +115,11 @@ def _run_as_admin(cmd_args):
         print(f"  [ADMIN] 直接运行失败 (code={r.returncode}): {r.stderr.strip()[:80]}")
         
         # 需要 UAC 提权
-        import ctypes
-        bat_path = os.path.join(AGENT_DIR, "_admin_cmd.bat")
-        result_path = os.path.join(AGENT_DIR, "_admin_result.txt")
+        import ctypes, tempfile
+        # 使用系统 TEMP 目录 (始终可写, 避免 AGENT_DIR 没有写权限)
+        tmp_dir = tempfile.gettempdir()
+        bat_path = os.path.join(tmp_dir, "_admin_cmd.bat")
+        result_path = os.path.join(tmp_dir, "_admin_result.txt")
         _unprotect_file(bat_path)
         _unprotect_file(result_path)
         # 删除旧的结果文件
@@ -132,7 +134,7 @@ def _run_as_admin(cmd_args):
         print(f"  [ADMIN] 请求 UAC 提权...")
         # 请求 UAC
         ret = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", "cmd.exe", f'/c "{bat_path}"', None, 1)  # 1=SW_SHOWNORMAL
+            None, "runas", "cmd.exe", f'/c "{bat_path}"', None, 0)  # 0=SW_HIDE 静默
         if ret <= 32:
             return False, f"UAC 被拒绝 (code={ret})"
         # 等待执行完
