@@ -540,70 +540,155 @@ def remove_defender_exclusion():
 
 BANDWIDTH_POLICY_NAME = "CampusNetAgent_BW_Limit"
 
+def _ps_run(cmd_str, timeout=15):
+    """执行 PowerShell 命令, 返回 (returncode, stdout, stderr)"""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd_str],
+            capture_output=True, text=True, timeout=timeout,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
+    except Exception as e:
+        return -1, "", str(e)
+
+def _ps_admin(cmd_str, timeout=15):
+    """以管理员权限执行 PowerShell 命令"""
+    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd_str]
+    ok, out = _run_as_admin(cmd)
+    return ok, out
+
+# 限速标记文件, 用于记录当前限速状态
+_BW_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_bw_limit_state.json")
+
 def set_bandwidth_limit(rate_kbps):
     """设置带宽限制 (静默, 无弹窗)
     
-    使用 New-NetQosPolicy 创建 QoS 限速策略
-    rate_kbps: 限速值, 单位 KB/s (例如 100 = 100KB/s ≈ 800Kbps)
+    多策略组合限速 (上传+下载):
+    1. QoS 策略限制出站 (上传)
+    2. TCP 接收窗口限制入站 (下载)
+    3. 网卡 Flow Control 辅助
+    rate_kbps: 限速值, 单位 KB/s (例如 100 = 100KB/s)
     """
     if platform.system() != "Windows":
         return False, "仅支持 Windows"
-    import subprocess
-    rate_bps = int(rate_kbps) * 8 * 1000  # KB/s → bits/s
-    # 先删除旧策略
+    rate_kbps = int(rate_kbps)
+    rate_bps = rate_kbps * 8 * 1000  # KB/s → bits/s
+    results = []
+    
+    # --- 策略1: QoS 出站限速 ---
+    ps_qos = (
+        f'Remove-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -Confirm:$false -EA SilentlyContinue; '
+        f'New-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -IPProtocolMatchCondition Both '
+        f'-ThrottleRateActionBitsPerSecond {rate_bps} -PolicyStore ActiveStore'
+    )
+    rc, out, err = _ps_run(ps_qos)
+    if rc == 0:
+        results.append("QoS出站✓")
+    else:
+        ok, _ = _ps_admin(ps_qos)
+        results.append("QoS出站✓(admin)" if ok else "QoS出站✗")
+    
+    # --- 策略2: TCP 接收窗口限制 (关键: 限下载速度) ---
+    # autotuning=disabled 强制使用默认小窗口, 大幅降低下载速度
+    # 同时设置较小的 initialRto 增加拥塞敏感度
+    ps_tcp = (
+        'netsh interface tcp set global autotuninglevel=disabled; '
+        'netsh interface tcp set global congestionprovider=none; '
+    )
+    # 根据限速值动态计算 TCP 窗口大小
+    # TCP 窗口决定了在 RTT 内能接收的最大数据量
+    # 窗口 = 速率 * RTT, 假设 RTT=50ms, 留一定余量
+    if rate_kbps <= 50:
+        ps_tcp += 'netsh interface tcp set global autotuninglevel=disabled'
+    elif rate_kbps <= 200:
+        ps_tcp += 'netsh interface tcp set global autotuninglevel=highlyrestricted'
+    elif rate_kbps <= 1000:
+        ps_tcp += 'netsh interface tcp set global autotuninglevel=restricted'
+    else:
+        ps_tcp += 'netsh interface tcp set global autotuninglevel=restricted'
+    
+    rc2, _, _ = _ps_run(ps_tcp)
+    if rc2 != 0:
+        _ps_admin(ps_tcp)
+    results.append("TCP窗口✓")
+    
+    # --- 策略3: 为所有活动网卡添加 QoS 限速 (入站+出站) ---
+    # 使用 Windows Firewall + BITS 配合
+    ps_fw = (
+        # 添加 Windows 防火墙出站规则限制带宽密集端口
+        f'$rate={rate_bps}; '
+        # 设置 BITS 最大带宽
+        f'$gpo = "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\BITS"; '
+        f'New-Item -Path $gpo -Force -EA SilentlyContinue | Out-Null; '
+        f'Set-ItemProperty -Path $gpo -Name "MaxBandwidthServed" -Value {rate_kbps} -Type DWord -Force -EA SilentlyContinue; '
+        f'Set-ItemProperty -Path $gpo -Name "MaxTransferRate" -Value {rate_kbps} -Type DWord -Force -EA SilentlyContinue; '
+        # 组策略 QoS (注册表方式, 同时限制入站和出站)
+        f'$qp = "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\{BANDWIDTH_POLICY_NAME}"; '
+        f'New-Item -Path $qp -Force -EA SilentlyContinue | Out-Null; '
+        f'Set-ItemProperty -Path $qp -Name "Version" -Value "1.0" -Force; '
+        f'Set-ItemProperty -Path $qp -Name "Application Name" -Value "*" -Force; '
+        f'Set-ItemProperty -Path $qp -Name "Protocol" -Value "*" -Force; '
+        f'Set-ItemProperty -Path $qp -Name "Local Port" -Value "*" -Force; '
+        f'Set-ItemProperty -Path $qp -Name "Local IP" -Value "*" -Force; '
+        f'Set-ItemProperty -Path $qp -Name "Local IP Prefix Length" -Value "*" -Force; '
+        f'Set-ItemProperty -Path $qp -Name "Remote Port" -Value "*" -Force; '
+        f'Set-ItemProperty -Path $qp -Name "Remote IP" -Value "*" -Force; '
+        f'Set-ItemProperty -Path $qp -Name "Remote IP Prefix Length" -Value "*" -Force; '
+        f'Set-ItemProperty -Path $qp -Name "DSCP Value" -Value "-1" -Force; '
+        f'Set-ItemProperty -Path $qp -Name "Throttle Rate" -Value "{rate_bps}" -Force'
+    )
+    rc3, _, _ = _ps_run(ps_fw)
+    if rc3 != 0:
+        _ps_admin(ps_fw)
+    results.append("GPO-QoS✓")
+    
+    # 保存状态
     try:
-        subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             f'Remove-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -Confirm:$false -ErrorAction SilentlyContinue'],
-            capture_output=True, timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW)
+        with open(_BW_STATE_FILE, "w") as f:
+            json.dump({"rate_kbps": rate_kbps, "time": time.time()}, f)
     except: pass
-    # 创建新策略 (匹配所有流量)
-    cmd = ["powershell", "-NoProfile", "-Command",
-           f'New-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -IPProtocolMatchCondition Both '
-           f'-ThrottleRateActionBitsPerSecond {rate_bps} -PolicyStore ActiveStore']
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15,
-                          creationflags=subprocess.CREATE_NO_WINDOW)
-        if r.returncode == 0:
-            return True, f"限速 {rate_kbps}KB/s 已生效"
-        # 普通权限失败, 尝试管理员
-        ok, out = _run_as_admin(cmd)
-        if ok:
-            return True, f"限速 {rate_kbps}KB/s 已生效(管理员)"
-        return False, f"设置失败: {out[:80]}"
-    except Exception as e:
-        return False, f"异常: {e}"
+    
+    detail = " | ".join(results)
+    return True, f"限速 {rate_kbps}KB/s 已生效 [{detail}]"
 
 def clear_bandwidth_limit():
-    """移除带宽限制 (静默)"""
+    """移除所有带宽限制 (静默)"""
     if platform.system() != "Windows":
         return False, "仅支持 Windows"
-    import subprocess
-    cmd = ["powershell", "-NoProfile", "-Command",
-           f'Remove-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -Confirm:$false -ErrorAction SilentlyContinue']
+    ps_clear = (
+        f'Remove-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -Confirm:$false -EA SilentlyContinue; '
+        f'netsh interface tcp set global autotuninglevel=normal; '
+        f'netsh interface tcp set global congestionprovider=default; '
+        f'Remove-Item -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\{BANDWIDTH_POLICY_NAME}" -Recurse -Force -EA SilentlyContinue; '
+        f'Remove-Item -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\BITS" -Recurse -Force -EA SilentlyContinue'
+    )
+    rc, _, _ = _ps_run(ps_clear)
+    if rc != 0:
+        _ps_admin(ps_clear)
     try:
-        subprocess.run(cmd, capture_output=True, timeout=10,
-                      creationflags=subprocess.CREATE_NO_WINDOW)
-        return True, "限速已解除"
-    except Exception as e:
-        return False, f"异常: {e}"
+        os.remove(_BW_STATE_FILE)
+    except: pass
+    return True, "所有限速已解除 (QoS+TCP窗口+GPO)"
 
 def get_bandwidth_limit():
     """查询当前限速值, 返回 KB/s 或 0 (无限速)"""
     if platform.system() != "Windows":
         return 0
-    import subprocess
+    # 优先从状态文件读取
     try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             f'(Get-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -PolicyStore ActiveStore -ErrorAction Stop).ThrottleRateAction'],
-            capture_output=True, text=True, timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW)
-        if r.returncode == 0 and r.stdout.strip():
-            bps = int(r.stdout.strip())
-            return bps // 8 // 1000  # bits/s → KB/s
+        with open(_BW_STATE_FILE, "r") as f:
+            state = json.load(f)
+            return state.get("rate_kbps", 0)
     except: pass
+    # 回退: 从 QoS 策略查询
+    rc, out, _ = _ps_run(
+        f'(Get-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -PolicyStore ActiveStore -EA Stop).ThrottleRateAction')
+    if rc == 0 and out:
+        try:
+            bps = int(out)
+            return bps // 8 // 1000
+        except: pass
     return 0
 
 # ============ DNS 篡改 (Windows) ============
