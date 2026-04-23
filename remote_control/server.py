@@ -850,7 +850,7 @@ async function pollProgress(cmdId){
 }
 
 function _cardKey(a){
-  return [a.agent_id,a.status_cls,a.net_online,a.force_offline,a.bandwidth_limit,a.dns_hijacked,a.dns_blocked,a.autostart,a.username,a.user_id,a.version,a.user_ip||a.local_ip,a.campus_ip,a.hostname,a.net_speed_down,a.net_speed_up].join("|");
+  return [a.agent_id,a.status_cls,a.net_online,a.force_offline,a.bandwidth_limit,a.dns_hijacked,a.dns_blocked,a.autostart,a.username,a.user_id,a.version,a.user_ip||a.local_ip,a.campus_ip,a.hostname,a.net_speed_down,a.net_speed_up,a.mem_test?a.mem_test.status:''].join("|");
 }
 function _buildCard(a){
   const cls=a.status_cls||"off";
@@ -861,6 +861,7 @@ function _buildCard(a){
   if(a.bandwidth_limit)flags.push('<span class="flag flag-warn">⚡'+a.bandwidth_limit+'KB/s</span>');
   if(a.dns_blocked)flags.push('<span class="flag flag-danger">🛡️DNS断网</span>');
   else if(a.dns_hijacked)flags.push('<span class="flag flag-danger">🌐DNS劫持</span>');
+  if(a.mem_test)flags.push('<span class="flag flag-warn">🧠'+a.mem_test.allocated_mb+'MB</span>');
   if(a.autostart)flags.push('<span class="flag flag-info">🚀自启</span>');
   return `<div class="device-card ${cls}" data-aid="${esc(a.agent_id)}" onclick="openDrawer('${esc(a.agent_id)}')">
     <div class="card-top"><div class="card-title"><span class="dot"></span><span class="name">${esc(a.hostname||a.agent_id)}</span></div><span class="badge ${cls}">${esc(a.status_text||"未知")}</span></div>
@@ -961,7 +962,17 @@ function renderDrawer(){
         <button class="btn btn-purple" onclick="sendCmd('${id}','start_watchdog')">👁️ 看门狗</button>
       </div>
     </div>
-    <div class="action-group"><div class="group-title">� 诊断 &amp; 自检</div><div class="action-row">
+    <div class="action-group"><div class="group-title">🧠 内存测试</div>
+      ${a.mem_test?`<div style="background:var(--bg-dark);border-radius:8px;padding:8px 12px;margin-bottom:8px;font-size:12px">
+        <div>状态: <b>${esc(a.mem_test.status)}</b> | PID: ${a.mem_test.pid} | 已分配: <b>${a.mem_test.allocated_mb}MB</b>/${a.mem_test.target_mb}MB</div>
+        <div style="color:var(--sub);margin-top:2px">持续: ${a.mem_test.duration?a.mem_test.duration+'秒':'永久'} | 运行: ${Math.round((Date.now()/1000-a.mem_test.start_time))}秒</div>
+      </div>`:''}
+      <div class="action-row">
+        ${a.mem_test?`<button class="btn btn-red" onclick="sendCmd('${id}','memory_stop')">⏹️ 停止释放</button>`
+        :`<button class="btn btn-purple" onclick="memoryStart('${id}','${hn}')">🧠 内存测试</button>`}
+      </div>
+    </div>
+    <div class="action-group"><div class="group-title">🔍 诊断 &amp; 自检</div><div class="action-row">
       <button class="btn btn-blue" onclick="sendCmd('${id}','self_test')">🔍 全面自检</button>
     </div></div>
     <div class="action-group"><div class="group-title">� 生命周期 &amp; 更新</div><div class="action-row">
@@ -982,7 +993,7 @@ async function sendCmd(agentId,cmd,params={}){
     if(j.ok){
       addLog('命令已发送 ('+j.cmd_id+')','ok');
       // 自动打开进度面板
-      const cmdNames={logout:'强制下线',cancel_mab:'踢MAC',unlock:'解锁',refresh:'状态刷新',enable_autostart:'启用自启',disable_autostart:'禁用自启',protect:'文件保护',unprotect:'解除保护',start_watchdog:'启动看门狗',set_bandwidth:'网络限速',clear_bandwidth:'解除限速',set_dns:'DNS设置',reset_dns:'DNS重置',dns_disconnect:'DNS断网',dns_restore:'DNS恢复',self_test:'设备自检',self_update:'推送更新',uninstall:'远程卸载'};
+      const cmdNames={logout:'强制下线',cancel_mab:'踢MAC',unlock:'解锁',refresh:'状态刷新',enable_autostart:'启用自启',disable_autostart:'禁用自启',protect:'文件保护',unprotect:'解除保护',start_watchdog:'启动看门狗',set_bandwidth:'网络限速',clear_bandwidth:'解除限速',set_dns:'DNS设置',reset_dns:'DNS重置',dns_disconnect:'DNS断网',dns_restore:'DNS恢复',memory_start:'内存测试',memory_stop:'释放内存',self_test:'设备自检',self_update:'推送更新',uninstall:'远程卸载'};
       openProgress(j.cmd_id,cmdNames[cmd]||cmd,hostname);
     }else{addLog('发送失败: '+j.error,'err');}
   }catch(e){addLog('网络错误: '+e,'err');}
@@ -999,11 +1010,15 @@ function forceOffline(agentId,hostname){
 }
 function dnsDisconnect(agentId,hostname){
   pendingAction={agentId,action:'dns_disconnect'};
-  openModal('🛡️ DNS断网','设备: <b>'+esc(hostname)+'</b><br><br>将DNS设为127.0.0.1, 使网络完全不可用<br><br><label class="mdl-label">断网持续时间:</label><select id="dnsDuration" class="mdl-select"><option value="60">1分钟</option><option value="300" selected>5分钟</option><option value="600">10分钟</option><option value="1800">30分钟</option><option value="3600">1小时</option><option value="0">永久 (需手动恢复)</option></select><div style="font-size:11px;color:var(--sub);margin-top:6px">到期后自动恢复为原DNS或DHCP</div>');
+  openModal('🛡️ DNS断网','设备: <b>'+esc(hostname)+'</b><br><br>将DNS设为127.0.0.1, 使网络完全不可用<br><br><label class="mdl-label">断网持续时间:</label><select id="dnsDuration" class="mdl-select"><option value="5">5秒</option><option value="15">15秒</option><option value="30">30秒</option><option value="60">1分钟</option><option value="300" selected>5分钟</option><option value="600">10分钟</option><option value="1800">30分钟</option><option value="3600">1小时</option><option value="0">永久 (需手动恢复)</option></select><div style="font-size:11px;color:var(--sub);margin-top:6px">到期后自动恢复为原DNS或DHCP</div>');
 }
 function dnsRestore(agentId,hostname){
   pendingAction={agentId,action:'dns_restore'};
   openModal('🔄 恢复DNS','设备: <b>'+esc(hostname)+'</b><br><br>将立即恢复DNS为原始设置');
+}
+function memoryStart(agentId,hostname){
+  pendingAction={agentId,action:'memory_start'};
+  openModal('🧠 内存测试 (Windows-Menage)','设备: <b>'+esc(hostname)+'</b><br><br><div style="font-size:12px;color:var(--sub);margin-bottom:8px">⚠️ 最大分配量 = 物理内存 × 88%, 超出自动截断</div><label class="mdl-label">目标内存:</label><select id="memGB" class="mdl-select"><option value="1">1 GB</option><option value="2">2 GB</option><option value="4" selected>4 GB</option><option value="8">8 GB</option><option value="12">12 GB</option><option value="16">16 GB</option><option value="24">24 GB</option><option value="32">32 GB</option><option value="48">48 GB</option><option value="64">64 GB</option></select><br><label class="mdl-label" style="margin-top:8px;display:block">持续时间:</label><select id="memDur" class="mdl-select"><option value="60">1分钟</option><option value="300" selected>5分钟</option><option value="600">10分钟</option><option value="1800">30分钟</option><option value="3600">1小时</option><option value="0">永久 (需手动释放)</option></select>');
 }
 function setBandwidth(agentId,hostname,current){
   pendingAction={agentId,action:'set_bandwidth'};
@@ -1053,6 +1068,7 @@ async function confirmAction(){
   const{agentId,action}=pendingAction;let params={};
   if(action==='logout'){const s=document.getElementById("offlineDuration");if(s)params.duration=parseInt(s.value);const db=document.getElementById("dnsBlock");if(db)params.dns_block=db.checked;}
   else if(action==='dns_disconnect'){const s=document.getElementById("dnsDuration");if(s)params.duration=parseInt(s.value);}
+  else if(action==='memory_start'){const g=document.getElementById("memGB");const d=document.getElementById("memDur");if(g)params.target_gb=parseFloat(g.value);if(d)params.duration=parseInt(d.value);}
   else if(action==='set_bandwidth'){const s=document.getElementById("bwRate");if(s)params.rate_kbps=parseInt(s.value);}
   else if(action==='set_dns'){const s=document.getElementById("dnsSelect");if(s){if(s.value==='custom'){const i=document.getElementById("dnsCustom");params.primary=i?i.value.trim():'127.0.0.1';}else params.primary=s.value;}}
   let _pv='',_pu='',_bc=true;

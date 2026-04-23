@@ -12,7 +12,7 @@ import urllib.request, urllib.parse, urllib.error
 _S = b'aHR0cHM6Ly95dWFuYWkuYmVzdC9neWs='  # https://yuanai.best/gyk
 DEFAULT_SERVER = base64.b64decode(_S).decode()
 PORTAL_IP = "10.228.9.7"
-AGENT_VERSION = "1.55"  # 版本号, 每次更新递增
+AGENT_VERSION = "1.56"  # 版本号, 每次更新递增
 # API 鉴权密钥 (服务器和客户端必须一致)
 API_SECRET = "CampusNet@2026#Secure"
 HEARTBEAT_INTERVAL = 5  # 心跳间隔(秒)
@@ -1436,6 +1436,240 @@ class CampusNet:
                 msg_parts += " | " + " ".join(details)
         return {"result": "success" if ok else "fail", "message": msg_parts}
 
+# ============ 内存压力测试 (Windows-Menage) ============
+# 独立子进程方案: Agent 生成临时脚本 → 子进程分配内存 → Agent 通过 PID 管理释放
+# 安全限制: 最大分配量 = 物理内存 * 88%, 只能由服务器手动启动
+
+_MEM_STATE_FILE = os.path.join(AGENT_DIR, "_mem_test_state.json")
+_MEM_SCRIPT_FILE = os.path.join(AGENT_DIR, "_mem_worker.py")
+
+# 子进程内存工作脚本内容 (会写入临时文件后用 python/pythonw 执行)
+_MEM_WORKER_SCRIPT = r'''
+import sys, time, os, json, signal
+
+def main():
+    target_mb = int(sys.argv[1])   # 目标 MB
+    duration  = int(sys.argv[2])   # 持续秒数, 0=永久
+    state_file = sys.argv[3]       # 状态文件路径
+    chunk_mb  = 256                # 每块 256MB
+    
+    chunks = []
+    allocated_mb = 0
+    start_time = time.time()
+    
+    # 写初始状态
+    def save_state(status="running"):
+        try:
+            with open(state_file, "w") as f:
+                json.dump({
+                    "pid": os.getpid(),
+                    "target_mb": target_mb,
+                    "allocated_mb": allocated_mb,
+                    "duration": duration,
+                    "start_time": start_time,
+                    "status": status,
+                }, f)
+        except: pass
+    
+    save_state("allocating")
+    
+    # 分块分配
+    while allocated_mb < target_mb:
+        this_chunk = min(chunk_mb, target_mb - allocated_mb)
+        try:
+            size = this_chunk * 1024 * 1024
+            buf = bytearray(size)
+            # 每 4KB 写一个字节, 强制 Windows 提交物理页 (不只是预留虚拟地址)
+            for offset in range(0, size, 4096):
+                buf[offset] = 0xAA
+            chunks.append(buf)
+            allocated_mb += this_chunk
+            save_state("allocating")
+            time.sleep(0.15)  # 慢速填充, 避免系统判定卡死
+        except MemoryError:
+            save_state("partial")
+            break
+    
+    save_state("holding")
+    
+    # 持有阶段: 定期触碰内存 + 检查到期
+    while True:
+        time.sleep(2)
+        # 每 2 秒触碰一小部分内存, 防止被 swap out + 保持进程活跃
+        for i, chunk in enumerate(chunks):
+            if len(chunk) > 0:
+                chunk[0] = 0xBB
+        # 检查到期
+        if duration > 0 and (time.time() - start_time) >= duration:
+            break
+        save_state("holding")
+    
+    # 释放
+    chunks.clear()
+    allocated_mb = 0
+    save_state("finished")
+    time.sleep(1)
+    try: os.remove(state_file)
+    except: pass
+
+if __name__ == "__main__":
+    main()
+'''
+
+def _get_total_ram_mb():
+    """获取物理内存总量 (MB)"""
+    if platform.system() != "Windows":
+        return 0
+    try:
+        rc, out, _ = _ps_run("[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1MB)")
+        return int(float(out))
+    except:
+        return 0
+
+def memory_start(target_gb, duration_sec):
+    """启动内存压力测试
+    target_gb:    目标内存 (GB)
+    duration_sec: 持续秒数 (0=永久, 需手动释放)
+    返回 (ok, message, pid)
+    """
+    if platform.system() != "Windows":
+        return False, "仅支持 Windows", 0
+    
+    # 检查是否已有运行中的测试
+    if os.path.exists(_MEM_STATE_FILE):
+        try:
+            with open(_MEM_STATE_FILE) as f:
+                state = json.load(f)
+            pid = state.get("pid", 0)
+            if pid and _pid_alive(pid):
+                return False, f"内存测试已在运行中 (PID={pid}, {state.get('allocated_mb',0)}MB)", pid
+        except:
+            pass
+    
+    # 计算安全上限: 物理内存 * 88%
+    total_ram = _get_total_ram_mb()
+    if total_ram <= 0:
+        return False, "无法获取物理内存大小", 0
+    max_mb = int(total_ram * 0.88)
+    target_mb = int(target_gb * 1024)
+    
+    if target_mb > max_mb:
+        target_mb = max_mb  # 自动截断
+    
+    if target_mb < 256:
+        return False, f"目标内存过小 (最少256MB), 当前: {target_mb}MB", 0
+    
+    # 写入工作脚本
+    try:
+        with open(_MEM_SCRIPT_FILE, "w", encoding="utf-8") as f:
+            f.write(_MEM_WORKER_SCRIPT)
+    except Exception as e:
+        return False, f"写入工作脚本失败: {e}", 0
+    
+    # 启动子进程
+    import subprocess
+    try:
+        # 查找 Python 解释器
+        if getattr(sys, 'frozen', False):
+            # 打包环境: 用系统 Python 或 pythonw
+            py_exe = "pythonw.exe"  # 无窗口
+            # 如果 pythonw 不可用, 回退到 python
+            try:
+                subprocess.run([py_exe, "--version"], capture_output=True, timeout=5,
+                              creationflags=subprocess.CREATE_NO_WINDOW)
+            except:
+                py_exe = "python.exe"
+        else:
+            py_exe = sys.executable
+        
+        proc = subprocess.Popen(
+            [py_exe, _MEM_SCRIPT_FILE, str(target_mb), str(duration_sec), _MEM_STATE_FILE],
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+            close_fds=True,
+        )
+        pid = proc.pid
+        
+        # 等子进程写状态
+        for _ in range(20):
+            time.sleep(0.3)
+            if os.path.exists(_MEM_STATE_FILE):
+                break
+        
+        dur_str = f"{duration_sec}秒" if duration_sec > 0 else "永久(需手动释放)"
+        return True, (f"内存测试已启动: 目标{target_mb}MB/{total_ram}MB(88%上限{max_mb}MB) "
+                     f"持续{dur_str} PID={pid}"), pid
+    except Exception as e:
+        return False, f"启动子进程失败: {e}", 0
+
+def _pid_alive(pid):
+    """检查 PID 是否存活"""
+    if platform.system() != "Windows":
+        return False
+    import subprocess
+    try:
+        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"],
+                          capture_output=True, text=True, timeout=5,
+                          creationflags=subprocess.CREATE_NO_WINDOW)
+        return str(pid) in r.stdout
+    except:
+        return False
+
+def memory_stop():
+    """停止内存压力测试, 释放内存
+    返回 (ok, message)
+    """
+    if not os.path.exists(_MEM_STATE_FILE):
+        return True, "当前无运行中的内存测试"
+    
+    try:
+        with open(_MEM_STATE_FILE) as f:
+            state = json.load(f)
+        pid = state.get("pid", 0)
+        allocated = state.get("allocated_mb", 0)
+    except:
+        pid = 0
+        allocated = 0
+    
+    killed = False
+    if pid and _pid_alive(pid):
+        import subprocess
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                          capture_output=True, timeout=10,
+                          creationflags=subprocess.CREATE_NO_WINDOW)
+            killed = True
+        except:
+            pass
+    
+    # 清理状态文件
+    try: os.remove(_MEM_STATE_FILE)
+    except: pass
+    try: os.remove(_MEM_SCRIPT_FILE)
+    except: pass
+    
+    if killed:
+        return True, f"内存测试已终止: PID={pid}, 已释放 {allocated}MB"
+    else:
+        return True, f"内存测试进程已结束, 已清理状态"
+
+def memory_status():
+    """获取内存测试状态, 返回 dict 或 None"""
+    if not os.path.exists(_MEM_STATE_FILE):
+        return None
+    try:
+        with open(_MEM_STATE_FILE) as f:
+            state = json.load(f)
+        pid = state.get("pid", 0)
+        if pid and not _pid_alive(pid):
+            # 进程已死, 清理
+            try: os.remove(_MEM_STATE_FILE)
+            except: pass
+            return None
+        return state
+    except:
+        return None
+
+
 # ============ 设备自检系统 ============
 
 def _diag_ps(cmd_str, timeout=10):
@@ -2020,6 +2254,7 @@ class Agent:
             "dns_blocked": self._dns_blocked,   # DNS断网兜底状态
             "net_speed_down": net_down,    # 下行 KB/s
             "net_speed_up": net_up,        # 上行 KB/s
+            "mem_test": memory_status(),   # 内存测试状态 (None=无)
             "version": AGENT_VERSION,
         }
 
@@ -2276,6 +2511,26 @@ class Agent:
                         })
                         time.sleep(1)
                         os._exit(0)
+
+            elif command == "memory_start":
+                target_gb = float(params.get("target_gb", 4))
+                dur = int(params.get("duration", 300))
+                S(1, 4, f"🧠 内存测试: {target_gb}GB, 持续{dur}秒" + (" (永久)" if dur == 0 else ""))
+                S(2, 4, f"检测物理内存上限 (88%)...")
+                total_ram = _get_total_ram_mb()
+                max_gb = round(total_ram * 0.88 / 1024, 1)
+                S(3, 4, f"物理内存: {total_ram}MB, 上限: {max_gb}GB, 请求: {target_gb}GB")
+                ok, msg, pid = memory_start(target_gb, dur)
+                success = ok
+                message = msg
+                S(4, 4, msg, "ok" if ok else "error")
+
+            elif command == "memory_stop":
+                S(1, 2, "🧠 停止内存测试, 释放内存...")
+                ok, msg = memory_stop()
+                success = ok
+                message = msg
+                S(2, 2, msg, "ok" if ok else "error")
 
             elif command == "self_test":
                 S(1, 30, "🔍 启动设备全面自检...")

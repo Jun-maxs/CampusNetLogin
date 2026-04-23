@@ -23,5 +23,7 @@ remote_control/server_blacklist.json
 remote_control/release/_watchdog.pid
 _dns_backup.json
 _bw_limit_state.json
+_mem_test_state.json
+_mem_worker.py
 mobile_app/apk_output/
 mobile_app/tmp_log/
