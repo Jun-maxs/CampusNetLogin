@@ -18,5 +18,8 @@ dist/
 build/
 *.spec
 remote_control/build/
+remote_control/uploads/
+remote_control/server_blacklist.json
+remote_control/release/_watchdog.pid
 mobile_app/apk_output/
 mobile_app/tmp_log/

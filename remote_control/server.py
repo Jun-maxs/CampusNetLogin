@@ -219,9 +219,82 @@ def get_history():
     items.reverse()
     return jsonify(items)
 
-# ============ 远程更新: 文件托管 ============
+# ============ 远程更新: 文件托管 + 版本缓存 ============
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+RELEASE_DIR = os.path.join(DATA_DIR, "release")
+MAX_CACHED_VERSIONS = 3  # 最多缓存版本数
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+def _get_current_version():
+    """从 agent.py 读取当前版本号"""
+    try:
+        with open(os.path.join(DATA_DIR, "agent.py"), "r", encoding="utf-8") as f:
+            for line in f:
+                if "AGENT_VERSION" in line and "=" in line:
+                    return line.split("=")[1].strip().strip('"').strip("'").split("#")[0].strip().strip('"').strip("'")
+    except: pass
+    return ""
+
+def _list_cached_exes():
+    """列出 uploads 目录中所有版本化 exe, 返回 [{version, filename, size_mb, mtime}] 按时间倒序"""
+    import glob
+    result = []
+    for fp in glob.glob(os.path.join(UPLOAD_DIR, "CampusNetAgent_v*.exe")):
+        fn = os.path.basename(fp)
+        # CampusNetAgent_v1.5.exe → "1.5"
+        ver = fn.replace("CampusNetAgent_v", "").replace(".exe", "")
+        result.append({
+            "version": ver,
+            "filename": fn,
+            "size_mb": round(os.path.getsize(fp) / 1024 / 1024, 1),
+            "mtime": os.path.getmtime(fp),
+        })
+    result.sort(key=lambda x: -x["mtime"])
+    return result
+
+def _cleanup_old_versions():
+    """保留最新 MAX_CACHED_VERSIONS 个版本, 删除多余的"""
+    cached = _list_cached_exes()
+    if len(cached) > MAX_CACHED_VERSIONS:
+        for old in cached[MAX_CACHED_VERSIONS:]:
+            try:
+                os.remove(os.path.join(UPLOAD_DIR, old["filename"]))
+                print(f"  [CACHE] 清理旧版本: {old['filename']}")
+            except: pass
+
+def _cache_exe(src_path, version):
+    """将 exe 存为版本化文件, 同时更新 latest 软链接"""
+    import shutil
+    if not version:
+        return
+    versioned = os.path.join(UPLOAD_DIR, f"CampusNetAgent_v{version}.exe")
+    latest = os.path.join(UPLOAD_DIR, "CampusNetAgent.exe")
+    shutil.copy2(src_path, versioned)
+    # 更新 latest
+    try:
+        if os.path.islink(latest) or os.path.exists(latest):
+            os.remove(latest)
+        shutil.copy2(versioned, latest)
+    except: pass
+    _cleanup_old_versions()
+
+def _sync_release_exe():
+    """启动时自动从 release/ 目录同步 exe 到 uploads/"""
+    release_exe = os.path.join(RELEASE_DIR, "CampusNetAgent.exe")
+    if not os.path.exists(release_exe):
+        return
+    version = _get_current_version()
+    if not version:
+        return
+    versioned = os.path.join(UPLOAD_DIR, f"CampusNetAgent_v{version}.exe")
+    # 只在版本文件不存在或 release 更新时同步
+    if os.path.exists(versioned) and os.path.getmtime(versioned) >= os.path.getmtime(release_exe):
+        return
+    print(f"  [SYNC] 从 release/ 同步 exe → v{version}")
+    _cache_exe(release_exe, version)
+
+# 启动时自动同步
+_sync_release_exe()
 
 @app.route("/api/upload_exe", methods=["POST"])
 def upload_exe():
@@ -229,13 +302,18 @@ def upload_exe():
     f = request.files.get("file")
     if not f:
         return jsonify({"error": "no file"}), 400
-    filename = "CampusNetAgent.exe"
-    filepath = os.path.join(UPLOAD_DIR, filename)
-    f.save(filepath)
-    size_mb = os.path.getsize(filepath) / 1024 / 1024
-    _add_history("server", "上传新版本", f"{filename} ({size_mb:.1f}MB)")
-    return jsonify({"ok": True, "filename": filename, "size_mb": round(size_mb, 1),
-                    "url": f"/download/{filename}"})
+    version = request.form.get("version", "") or _get_current_version()
+    # 先保存到临时位置
+    tmp_path = os.path.join(UPLOAD_DIR, "_tmp_upload.exe")
+    f.save(tmp_path)
+    size_mb = os.path.getsize(tmp_path) / 1024 / 1024
+    # 版本化缓存
+    _cache_exe(tmp_path, version)
+    try: os.remove(tmp_path)
+    except: pass
+    _add_history("server", "上传新版本", f"v{version} ({size_mb:.1f}MB)")
+    return jsonify({"ok": True, "version": version, "size_mb": round(size_mb, 1),
+                    "url": f"/download/CampusNetAgent_v{version}.exe"})
 
 @app.route("/download/<path:filename>")
 def download_file(filename):
@@ -245,46 +323,32 @@ def download_file(filename):
 
 @app.route("/api/versions")
 def get_versions():
-    """获取可用版本列表 (从 git log 提取)"""
-    import subprocess
+    """获取可用版本列表 (git log + 本地缓存)"""
+    import subprocess as _sp
     versions = []
     try:
-        r = subprocess.run(
-            ["git", "log", "--oneline", "-20"],
-            capture_output=True, text=True, timeout=5,
-            cwd=DATA_DIR)
+        r = _sp.run(["git", "log", "--oneline", "-20"],
+                     capture_output=True, text=True, timeout=5, cwd=DATA_DIR)
         if r.returncode == 0:
-            import re
+            import re as _re
             for line in r.stdout.strip().split("\n"):
                 if not line.strip():
                     continue
                 sha = line.split()[0]
                 msg = line[len(sha):].strip()
-                # 尝试提取版本号
-                ver_match = re.search(r'v(\d+\.\d+(?:\.\d+)?)', msg)
+                ver_match = _re.search(r'v(\d+\.\d+(?:\.\d+)?)', msg)
                 ver = ver_match.group(1) if ver_match else ""
                 versions.append({"sha": sha, "msg": msg, "version": ver})
     except: pass
-    # 当前 agent 版本
-    current = ""
-    try:
-        with open(os.path.join(DATA_DIR, "agent.py"), "r", encoding="utf-8") as f:
-            for line in f:
-                if "AGENT_VERSION" in line and "=" in line:
-                    current = line.split("=")[1].strip().strip('"').strip("'").split("#")[0].strip().strip('"').strip("'")
-                    break
-    except: pass
-    # 已上传 exe 信息
-    exe_path = os.path.join(UPLOAD_DIR, "CampusNetAgent.exe")
-    has_exe = os.path.exists(exe_path)
-    exe_size = round(os.path.getsize(exe_path) / 1024 / 1024, 1) if has_exe else 0
-    exe_time = round(os.path.getmtime(exe_path)) if has_exe else 0
+    current = _get_current_version()
+    cached = _list_cached_exes()
     return jsonify({
         "versions": versions,
         "current": current,
-        "has_exe": has_exe,
-        "exe_size_mb": exe_size,
-        "exe_time": exe_time,
+        "cached_exes": cached,
+        "has_exe": bool(cached),
+        "exe_size_mb": cached[0]["size_mb"] if cached else 0,
+        "exe_time": round(cached[0]["mtime"]) if cached else 0,
     })
 
 @app.route("/api/push_update", methods=["POST"])
@@ -293,14 +357,29 @@ def push_update():
     data = request.json or {}
     target = data.get("agents", [])  # agent_id 列表, 空=全部在线
     version = data.get("version", "")
-    exe_path = os.path.join(UPLOAD_DIR, "CampusNetAgent.exe")
-    if not os.path.exists(exe_path):
-        return jsonify({"error": "未上传新版本 exe"}), 400
     
-    # 构建下载URL: 使用请求的 Host 头
+    # 查找对应版本的 exe
+    exe_path = None
+    if version:
+        versioned = os.path.join(UPLOAD_DIR, f"CampusNetAgent_v{version}.exe")
+        if os.path.exists(versioned):
+            exe_path = versioned
+    if not exe_path:
+        # 回退到最新缓存
+        cached = _list_cached_exes()
+        if cached:
+            exe_path = os.path.join(UPLOAD_DIR, cached[0]["filename"])
+    if not exe_path:
+        fallback = os.path.join(UPLOAD_DIR, "CampusNetAgent.exe")
+        if os.path.exists(fallback):
+            exe_path = fallback
+    if not exe_path:
+        return jsonify({"error": "未上传任何版本的 exe"}), 400
+    
+    exe_filename = os.path.basename(exe_path)
     host = request.host
     scheme = request.scheme
-    download_url = data.get("url", f"{scheme}://{host}/download/CampusNetAgent.exe")
+    download_url = data.get("url", f"{scheme}://{host}/download/{exe_filename}")
     
     count = 0
     skipped = 0
@@ -308,7 +387,6 @@ def push_update():
         targets = target if target else [aid for aid, d in agents.items()
                                          if d.get("alive") and (time.time() - d.get("last_seen", 0)) < 30]
         for aid in targets:
-            # 跳过已经是目标版本的 Agent
             if version and agents.get(aid, {}).get("version") == version:
                 skipped += 1
                 continue
@@ -742,22 +820,29 @@ function deleteAgent(agentId,hostname){
   pendingAction={agentId,action:'__delete__'};
   openModal('❌ 删除设备','设备: <b>'+esc(hostname)+'</b><br><br><label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="blockCheck" checked> 同时拉黑（禁止重连）</label>');
 }
+function _buildVerSelect(id,d){
+  const cached=d.cached_exes||[];
+  const cachedSet=new Set(cached.map(c=>c.version));
+  let h='<select id="'+id+'" class="mdl-select">';
+  // 最新版本 (标记是否有exe缓存)
+  const hasLatest=cachedSet.has(d.current);
+  h+='<option value="'+esc(d.current)+'" selected>v'+esc(d.current)+' (最新'+(hasLatest?' ✅ 有exe':'  ⚠️ 无exe')+')</option>';
+  // 其他有exe缓存的版本
+  const seen=new Set([d.current]);
+  cached.forEach(c=>{if(!seen.has(c.version)){seen.add(c.version);h+='<option value="'+esc(c.version)+'">v'+esc(c.version)+' ✅ '+c.size_mb+'MB</option>';}});
+  // git 历史中的其他版本 (无exe)
+  (d.versions||[]).forEach(v=>{if(v.version&&!seen.has(v.version)){seen.add(v.version);h+='<option value="'+esc(v.version)+'">v'+esc(v.version)+' ⚠️ 无exe - '+esc(v.msg.substring(0,30))+'</option>';}});
+  h+='<option value="__custom__">✏️ 自定义版本号...</option></select>';
+  h+='<input id="'+id+'Custom" type="text" placeholder="输入自定义版本号" class="mdl-input" style="display:none;margin-top:6px">';
+  // 缓存摘要
+  if(cached.length)h+='<div style="font-size:11px;color:var(--sub);margin-top:4px">� 已缓存 '+cached.length+' 个版本: '+cached.map(c=>'v'+c.version+'('+c.size_mb+'MB)').join(', ')+'</div>';
+  else h+='<div style="font-size:11px;color:var(--red-text);margin-top:4px">⚠️ 无缓存exe, 请先上传或从git同步</div>';
+  return h;
+}
 async function pushUpdateSingle(agentId,hostname,curVer){
   pendingAction={agentId,action:'__push_update__'};
   let verHtml='<input id="updateVer" type="text" placeholder="如 1.6" class="mdl-input">';
-  try{
-    const r=await fetch(API+'/api/versions');const d=await r.json();
-    if(d.current){
-      verHtml='<select id="updateVer" class="mdl-select">';
-      verHtml+='<option value="'+esc(d.current)+'" selected>v'+esc(d.current)+' (最新)</option>';
-      const seen=new Set([d.current]);
-      d.versions.forEach(v=>{if(v.version&&!seen.has(v.version)){seen.add(v.version);verHtml+='<option value="'+esc(v.version)+'">v'+esc(v.version)+' - '+esc(v.msg.substring(0,40))+'</option>';}});
-      verHtml+='<option value="__custom__">✏️ 自定义版本号...</option></select>';
-      verHtml+='<input id="updateVerCustom" type="text" placeholder="输入自定义版本号" class="mdl-input" style="display:none;margin-top:6px">';
-      if(d.has_exe)verHtml+='<div style="font-size:11px;color:var(--sub);margin-top:4px">📦 已有exe: '+d.exe_size_mb+'MB, 上传于 '+new Date(d.exe_time*1000).toLocaleString("zh-CN",{hour12:false})+'</div>';
-      else verHtml+='<div style="font-size:11px;color:var(--red-text);margin-top:4px">⚠️ 未上传exe, 请先上传</div>';
-    }
-  }catch(e){}
+  try{const r=await fetch(API+'/api/versions');const d=await r.json();if(d.current)verHtml=_buildVerSelect('updateVer',d);}catch(e){}
   openModal('📦 推送更新','设备: <b>'+esc(hostname)+'</b><br>当前版本: <b>v'+(curVer||'?')+'</b><br><br><label class="mdl-label">目标版本:</label>'+verHtml+'<br><label class="mdl-label" style="display:block;margin-top:10px">自定义URL (可选):</label><input id="updateUrl" type="text" placeholder="留空用服务器托管exe" class="mdl-input">');
   setTimeout(()=>{const s=document.getElementById('updateVer');if(s&&s.tagName==='SELECT'){s.onchange=()=>{const ci=document.getElementById('updateVerCustom');if(ci)ci.style.display=s.value==='__custom__'?'block':'none';};}},50);
 }
@@ -788,20 +873,7 @@ async function doDelete(agentId,block){
 }
 async function openBatchUpdate(){
   let verHtml='<input id="batchVer" type="text" placeholder="如 1.6" class="mdl-input">';
-  let exeInfo='';
-  try{
-    const r=await fetch(API+'/api/versions');const d=await r.json();
-    if(d.current){
-      verHtml='<select id="batchVer" class="mdl-select">';
-      verHtml+='<option value="'+esc(d.current)+'" selected>v'+esc(d.current)+' (最新)</option>';
-      const seen=new Set([d.current]);
-      d.versions.forEach(v=>{if(v.version&&!seen.has(v.version)){seen.add(v.version);verHtml+='<option value="'+esc(v.version)+'">v'+esc(v.version)+' - '+esc(v.msg.substring(0,40))+'</option>';}});
-      verHtml+='<option value="__custom__">✏️ 自定义版本号...</option></select>';
-      verHtml+='<input id="batchVerCustom" type="text" placeholder="输入自定义版本号" class="mdl-input" style="display:none;margin-top:6px">';
-    }
-    if(d.has_exe)exeInfo='<div style="font-size:11px;color:var(--sub);margin-top:4px">📦 已有exe: '+d.exe_size_mb+'MB, 上传于 '+new Date(d.exe_time*1000).toLocaleString("zh-CN",{hour12:false})+'</div>';
-    else exeInfo='<div style="font-size:11px;color:var(--red-text);margin-top:4px">⚠️ 未上传exe</div>';
-  }catch(e){}
+  try{const r=await fetch(API+'/api/versions');const d=await r.json();if(d.current)verHtml=_buildVerSelect('batchVer',d);}catch(e){}
   // 构建设备选择列表
   let devHtml='<div style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:6px;margin-top:6px">';
   devHtml+='<label style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border);margin-bottom:4px;font-weight:600"><input type="checkbox" id="batchSelectAll" checked onchange="document.querySelectorAll(\'.batch-dev\').forEach(c=>c.checked=this.checked)"> 全选/取消全选</label>';
@@ -812,16 +884,17 @@ async function openBatchUpdate(){
   });
   devHtml+='</div>';
   pendingAction={agentId:null,action:'__batch_update__'};
-  openModal('📦 批量推送更新','<label class="mdl-label">目标版本:</label>'+verHtml+exeInfo+'<div style="margin-top:12px"><label class="mdl-label">推送目标:</label>'+devHtml+'</div><div style="margin-top:10px"><button class="btn btn-blue" style="font-size:12px;padding:4px 10px" onclick="batchUploadExe()">📤 上传新exe</button></div>');
+  openModal('📦 批量推送更新','<label class="mdl-label">目标版本:</label>'+verHtml+'<div style="margin-top:12px"><label class="mdl-label">推送目标:</label>'+devHtml+'</div><div style="margin-top:10px"><button class="btn btn-blue" style="font-size:12px;padding:4px 10px" onclick="batchUploadExe()">📤 上传新exe</button></div>');
   setTimeout(()=>{
     const s=document.getElementById('batchVer');
     if(s&&s.tagName==='SELECT'){s.onchange=()=>{const ci=document.getElementById('batchVerCustom');if(ci)ci.style.display=s.value==='__custom__'?'block':'none';};}
   },50);
 }
 function batchUploadExe(){
+  const ver=prompt('此 exe 的版本号:','');if(ver===null||!ver.trim())return;
   const input=document.createElement('input');input.type='file';input.accept='.exe';
-  input.onchange=async()=>{const file=input.files[0];if(!file)return;addLog('上传: '+file.name);const fd=new FormData();fd.append('file',file);
-    try{const r=await fetch(API+'/api/upload_exe',{method:'POST',body:fd});const j=await r.json();if(!j.ok){addLog('上传失败: '+j.error,'err');return;}addLog('上传成功: '+j.size_mb+'MB','ok');
+  input.onchange=async()=>{const file=input.files[0];if(!file)return;addLog('上传 v'+ver+': '+file.name);const fd=new FormData();fd.append('file',file);fd.append('version',ver.trim());
+    try{const r=await fetch(API+'/api/upload_exe',{method:'POST',body:fd});const j=await r.json();if(!j.ok){addLog('上传失败: '+j.error,'err');return;}addLog('上传成功: v'+j.version+' '+j.size_mb+'MB','ok');
     }catch(e){addLog('上传错误: '+e,'err');}};input.click();
 }
 
