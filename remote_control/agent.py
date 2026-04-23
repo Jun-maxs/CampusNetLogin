@@ -12,7 +12,7 @@ import urllib.request, urllib.parse, urllib.error
 _S = b'aHR0cHM6Ly95dWFuYWkuYmVzdC9neWs='  # https://yuanai.best/gyk
 DEFAULT_SERVER = base64.b64decode(_S).decode()
 PORTAL_IP = "10.228.9.7"
-AGENT_VERSION = "1.53"  # 版本号, 每次更新递增
+AGENT_VERSION = "1.54"  # 版本号, 每次更新递增
 # API 鉴权密钥 (服务器和客户端必须一致)
 API_SECRET = "CampusNet@2026#Secure"
 HEARTBEAT_INTERVAL = 5  # 心跳间隔(秒)
@@ -759,6 +759,57 @@ def reset_dns():
     ok_count = sum(1 for r in results if '✓' in r)
     return ok_count > 0, f"DNS已恢复DHCP | {' '.join(results)}"
 
+# ============ 网络速度采样 ============
+
+_net_prev = {"recv": 0, "sent": 0, "time": 0}
+
+def _get_net_bytes():
+    """获取所有网卡的累计收发字节数 (Windows, PowerShell)"""
+    if platform.system() != "Windows":
+        return 0, 0
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "$r=0;$s=0;Get-NetAdapterStatistics|ForEach-Object{$r+=$_.ReceivedBytes;$s+=$_.SentBytes};\"$r $s\""],
+            capture_output=True, text=True, timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        parts = r.stdout.strip().split()
+        if len(parts) == 2:
+            return int(parts[0]), int(parts[1])
+    except:
+        pass
+    return 0, 0
+
+def get_net_speed():
+    """获取当前网络上下行速度 (KB/s), 基于两次采样差值
+    返回 (down_kbps, up_kbps)
+    """
+    recv, sent = _get_net_bytes()
+    now = time.time()
+    
+    prev_recv = _net_prev["recv"]
+    prev_sent = _net_prev["sent"]
+    prev_time = _net_prev["time"]
+    
+    _net_prev["recv"] = recv
+    _net_prev["sent"] = sent
+    _net_prev["time"] = now
+    
+    if prev_time == 0 or recv == 0:
+        return 0.0, 0.0  # 首次采样, 无法计算
+    
+    dt = now - prev_time
+    if dt < 1:
+        return 0.0, 0.0
+    
+    down = round((recv - prev_recv) / dt / 1024, 1)  # KB/s
+    up = round((sent - prev_sent) / dt / 1024, 1)
+    # 防止负数 (网卡重置/切换)
+    if down < 0: down = 0.0
+    if up < 0: up = 0.0
+    return down, up
+
 def get_dns_status():
     """查询当前 DNS 设置, 返回 (is_hijacked: bool, dns_servers: str)
     
@@ -1462,9 +1513,10 @@ class Agent:
             print("  [断连] 清理完毕")
         self.was_online = online
         
-        # 查询限速和DNS状态 (每次心跳上报, 让服务器实时可见)
+        # 查询限速、DNS状态和网速 (每次心跳上报, 让服务器实时可见)
         bw_limit = get_bandwidth_limit()
         dns_hijacked, dns_servers = get_dns_status()
+        net_down, net_up = get_net_speed()
         
         return {
             "agent_id": self.agent_id,
@@ -1492,12 +1544,18 @@ class Agent:
             "dns_hijacked": dns_hijacked,      # bool
             "dns_servers": dns_servers,         # 当前DNS字符串
             "dns_blocked": self._dns_blocked,   # DNS断网兜底状态
+            "net_speed_down": net_down,    # 下行 KB/s
+            "net_speed_up": net_up,        # 上行 KB/s
             "version": AGENT_VERSION,
         }
 
     def heartbeat(self):
         """发送心跳并接收命令"""
         status = self.build_status()
+        # 首次心跳上报开机事件
+        if getattr(self, '_report_boot', False):
+            status["event"] = "boot"
+            self._report_boot = False
         result = http_post(f"{self.server_url}/api/heartbeat", status)
         if "error" in result:
             print(f"  [!] 心跳失败: {result['error']}")
@@ -1505,6 +1563,26 @@ class Agent:
         # 处理命令
         for cmd in result.get("commands", []):
             self.execute(cmd)
+
+    def _on_shutdown(self, event=0):
+        """关机/退出回调: 向服务器发送关机报告"""
+        if getattr(self, '_shutdown_reported', False):
+            return
+        self._shutdown_reported = True
+        event_names = {0: "进程退出", 2: "窗口关闭", 5: "用户注销", 6: "系统关机"}
+        reason = event_names.get(event, f"未知({event})")
+        print(f"  [关机] 上报关机事件: {reason}")
+        try:
+            http_post(f"{self.server_url}/api/heartbeat", {
+                "agent_id": self.agent_id,
+                "hostname": self.hostname,
+                "event": "shutdown",
+                "shutdown_reason": reason,
+                "uptime": self.get_uptime(),
+                "version": AGENT_VERSION,
+            })
+        except:
+            pass
 
     def _report_step(self, cmd_id, command, step, total, msg, status="running"):
         """向服务器汇报命令执行进度"""
@@ -1800,11 +1878,33 @@ class Agent:
         
         print("  Agent 运行中... (Ctrl+C 停止)\n")
         
+        # 注册关机/退出回调
+        self._shutdown_reported = False
+        import atexit
+        atexit.register(self._on_shutdown)
+        if platform.system() == "Windows":
+            try:
+                import ctypes
+                @ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+                def _console_handler(event):
+                    # CTRL_CLOSE_EVENT=2, CTRL_LOGOFF_EVENT=5, CTRL_SHUTDOWN_EVENT=6
+                    if event in (2, 5, 6):
+                        self._on_shutdown(event)
+                    return 0
+                self._handler_ref = _console_handler  # prevent GC
+                ctypes.windll.kernel32.SetConsoleCtrlHandler(_console_handler, True)
+            except:
+                pass
+        
+        # 首次心跳: 上报开机事件
+        self._report_boot = True
+        
         while True:
             try:
                 self.heartbeat()
             except KeyboardInterrupt:
                 print("\n  Agent 已停止")
+                self._on_shutdown()
                 break
             except Exception as e:
                 print(f"  [ERR] {e}")

@@ -108,14 +108,27 @@ def heartbeat():
         return jsonify({"error": "no agent_id"}), 400
     if aid in blacklist:
         return jsonify({"error": "blocked", "commands": [{"id": "blk", "command": "exit"}]}), 403
+    event = data.get("event", "")
     with lock:
         is_new = aid not in agents
         was_alive = agents.get(aid, {}).get("alive", False)
+        if event == "shutdown":
+            # 关机报告: 标记离线, 记录日志, 不清除其他状态
+            if aid in agents:
+                agents[aid]["alive"] = False
+                agents[aid]["last_seen"] = time.time()
+            reason = data.get("shutdown_reason", "未知")
+            uptime = data.get("uptime", "")
+            _add_history(aid, "⏻ 设备关机", f"原因: {reason} | 运行时长: {uptime}")
+            _save_agents()
+            return jsonify({"commands": []})
         agents[aid] = {**data, "last_seen": time.time(), "alive": True}
         pending = commands.pop(aid, [])
         _save_agents()
         if is_new:
             _add_history(aid, "首次连接", f"主机: {data.get('hostname','')} IP: {data.get('local_ip','')}")
+        elif event == "boot":
+            _add_history(aid, "🟢 设备开机", f"主机: {data.get('hostname','')} IP: {data.get('local_ip','')} v{data.get('version','?')}")
         elif not was_alive:
             _add_history(aid, "重新上线", f"IP: {data.get('local_ip','')}")
     return jsonify({"commands": pending})
@@ -837,7 +850,7 @@ async function pollProgress(cmdId){
 }
 
 function _cardKey(a){
-  return [a.agent_id,a.status_cls,a.net_online,a.force_offline,a.bandwidth_limit,a.dns_hijacked,a.dns_blocked,a.autostart,a.username,a.user_id,a.version,a.user_ip||a.local_ip,a.campus_ip,a.hostname].join("|");
+  return [a.agent_id,a.status_cls,a.net_online,a.force_offline,a.bandwidth_limit,a.dns_hijacked,a.dns_blocked,a.autostart,a.username,a.user_id,a.version,a.user_ip||a.local_ip,a.campus_ip,a.hostname,a.net_speed_down,a.net_speed_up].join("|");
 }
 function _buildCard(a){
   const cls=a.status_cls||"off";
@@ -852,7 +865,7 @@ function _buildCard(a){
   return `<div class="device-card ${cls}" data-aid="${esc(a.agent_id)}" onclick="openDrawer('${esc(a.agent_id)}')">
     <div class="card-top"><div class="card-title"><span class="dot"></span><span class="name">${esc(a.hostname||a.agent_id)}</span></div><span class="badge ${cls}">${esc(a.status_text||"未知")}</span></div>
     <div class="card-user">${a.username?'👤 '+esc(a.username):''}${a.user_id?' · '+esc(a.user_id):''}${!a.username&&!a.user_id?'<span style="color:var(--sub)">未获取用户信息</span>':''}</div>
-    <div class="card-meta"><span>🌐 ${esc(a.user_ip||a.local_ip||"--")}</span><span>📦 v${esc(a.version||"?")}</span></div>
+    <div class="card-meta"><span>🌐 ${esc(a.user_ip||a.local_ip||"--")}</span>${(a.net_speed_down>0||a.net_speed_up>0)?'<span>↓'+(a.net_speed_down>1024?(a.net_speed_down/1024).toFixed(1)+'M':Math.round(a.net_speed_down)+'K')+' ↑'+(a.net_speed_up>1024?(a.net_speed_up/1024).toFixed(1)+'M':Math.round(a.net_speed_up)+'K')+'</span>':'<span>📦 v'+esc(a.version||'?')+'</span>'}</div>
     <div class="card-flags">${flags.join("")}</div>
     <div class="card-foot"><span>心跳 <span class="js-hb">${ago(a.last_seen)}</span></span><span>运行 <span class="js-up">${esc(a.uptime||"--")}</span></span></div>
   </div>`;
@@ -920,6 +933,8 @@ function renderDrawer(){
       <div class="ig-row"><span class="ig-k">网络状态</span><span class="ig-v ${a.force_offline?'bad':a.net_online?'good':'warn'}">${net}</span></div>
       <div class="ig-row half"><span class="ig-k">⚡ 限速</span><span class="ig-v ${a.bandwidth_limit?'bad':'good'}">${bw}</span></div>
       <div class="ig-row half"><span class="ig-k">🌐 DNS</span><span class="ig-v ${a.dns_hijacked?'bad':'good'}">${dns}${a.dns_blocked?' 🛡️断网中':''}</span></div>
+      <div class="ig-row half"><span class="ig-k">📶 下行</span><span class="ig-v">${a.net_speed_down>0?(a.net_speed_down>1024?(a.net_speed_down/1024).toFixed(1)+' MB/s':a.net_speed_down+' KB/s'):'--'}</span></div>
+      <div class="ig-row half"><span class="ig-k">📤 上行</span><span class="ig-v">${a.net_speed_up>0?(a.net_speed_up>1024?(a.net_speed_up/1024).toFixed(1)+' MB/s':a.net_speed_up+' KB/s'):'--'}</span></div>
       <div class="ig-row half"><span class="ig-k">运行时间</span><span class="ig-v">${esc(a.uptime||'--')}</span></div>
       <div class="ig-row half"><span class="ig-k">版本</span><span class="ig-v">v${esc(a.version||'?')}</span></div>
     </section>
