@@ -757,19 +757,28 @@ class CampusNet:
         except Exception as e:
             return {"result": "fail", "message": str(e)}
 
+    def _portal_post(self, url, data_dict, timeout=10):
+        """统一的 portal POST: 优先复用已有的 cookie opener (携带JSESSIONID)"""
+        data = urllib.parse.urlencode(data_dict).encode()
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        # 优先用带cookie的opener (由 _refresh_user_index 保存)
+        opener = getattr(self, "_cookie_opener", None)
+        if opener is not None:
+            resp = opener.open(req, timeout=timeout)
+        else:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+        return resp.read().decode("utf-8", errors="ignore")
+
     def cancel_mab(self):
         """取消本机无感认证 (cancelMab)"""
         if not self.user_index:
             return {"result": "fail", "message": "无 userIndex"}
         try:
             url = f"{self.base_url}/eportal/InterFace.do?method=cancelMab"
-            data = urllib.parse.urlencode({"userIndex": self.user_index}).encode()
-            req = urllib.request.Request(url, data=data, method="POST")
-            req.add_header("Content-Type", "application/x-www-form-urlencoded")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                text = resp.read().decode("utf-8")
-                print(f"  [NET] cancelMab: {text[:120]}")
-                return json.loads(text)
+            text = self._portal_post(url, {"userIndex": self.user_index})
+            print(f"  [NET] cancelMab: {text[:120]}")
+            return json.loads(text)
         except Exception as e:
             return {"result": "fail", "message": str(e)}
 
@@ -780,13 +789,9 @@ class CampusNet:
         try:
             mac = get_mac().replace(":", "")
             url = f"{self.base_url}/eportal/InterFace.do?method=cancelMacWithUserNameAndMac"
-            data = urllib.parse.urlencode({"userId": self.username, "usermac": mac}).encode()
-            req = urllib.request.Request(url, data=data, method="POST")
-            req.add_header("Content-Type", "application/x-www-form-urlencoded")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                text = resp.read().decode("utf-8")
-                print(f"  [NET] cancelMacByName: {text[:120]}")
-                return json.loads(text)
+            text = self._portal_post(url, {"userId": self.username, "usermac": mac})
+            print(f"  [NET] cancelMacByName: {text[:120]}")
+            return json.loads(text)
         except Exception as e:
             return {"result": "fail", "message": str(e)}
 
@@ -796,26 +801,35 @@ class CampusNet:
             return {"result": "fail", "message": "无 userIndex"}
         try:
             url = f"{self.base_url}/eportal/InterFace.do?method=logout"
-            data = urllib.parse.urlencode({"userIndex": self.user_index}).encode()
-            req = urllib.request.Request(url, data=data, method="POST")
-            req.add_header("Content-Type", "application/x-www-form-urlencoded")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                text = resp.read().decode("utf-8")
-                result = json.loads(text)
-                if result.get("result") == "success":
-                    self.user_index = ""
-                return result
+            text = self._portal_post(url, {"userIndex": self.user_index})
+            print(f"  [NET] logout: {text[:120]}")
+            result = json.loads(text)
+            if result.get("result") == "success":
+                self.user_index = ""
+            return result
         except Exception as e:
             return {"result": "fail", "message": str(e)}
 
     def _refresh_user_index(self):
-        """强制刷新 user_index (不依赖缓存, 通过 IP 查询 portal)"""
+        """强制刷新 user_index (不依赖缓存, 通过 IP + cookie 查询 portal)
+        
+        关键: 锐捷portal需要JSESSIONID cookie才能识别身份
+        先GET首页获取cookie, 再带cookie POST getOnlineUserInfo
+        """
         try:
-            # 方式1: 空 userIndex POST getOnlineUserInfo → portal 按源IP返回
+            import http.cookiejar
+            # 1. 建立带cookie jar的opener
+            jar = http.cookiejar.CookieJar()
+            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+            # 2. 先GET首页让portal set JSESSIONID cookie
+            try:
+                opener.open(self.base_url + "/", timeout=5).read()
+            except: pass
+            # 3. 带cookie POST查询
             info_url = f"{self.base_url}/eportal/InterFace.do?method=getOnlineUserInfo"
             req = urllib.request.Request(info_url, data=b"userIndex=", method="POST")
             req.add_header("Content-Type", "application/x-www-form-urlencoded")
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with opener.open(req, timeout=5) as resp:
                 text = resp.read().decode("utf-8", errors="ignore")
                 info = json.loads(text)
                 ui = info.get("userIndex", "")
@@ -827,6 +841,9 @@ class CampusNet:
                         self.username = name
                     if uid and not self.username:
                         self.username = uid
+                    # 保存cookie jar给其他请求复用
+                    self._cookie_jar = jar
+                    self._cookie_opener = opener
                     print(f"  [NET] 刷新 user_index 成功: {ui[:16]}... (user={name or uid})")
                     return True
                 else:
