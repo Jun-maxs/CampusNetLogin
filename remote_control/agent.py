@@ -442,24 +442,38 @@ def full_uninstall():
 # ============ 文件/进程保护 (Windows) ============
 
 def protect_files():
-    """保护 Agent 文件: 隐藏+系统+只读属性 + NTFS权限"""
+    """保护 Agent 运行时文件: 隐藏+系统+只读属性 + NTFS权限
+    
+    注意: exe 本身不设 H/S 属性 (否则资源管理器看不到, 不便分发)
+    exe 的防删除保护依赖: 运行时文件被系统锁定 + NTFS 权限限制
+    """
     if platform.system() != "Windows":
         return False, "仅支持 Windows"
     import subprocess
     results = []
-    agent_dir = os.path.dirname(AGENT_SCRIPT)
+    agent_dir = AGENT_DIR
     
-    # 1. 设置文件属性: 隐藏+系统+只读
-    targets = [AGENT_SCRIPT, CONFIG_FILE,
-               os.path.join(agent_dir, "start_agent.vbs")]
-    for f in targets:
+    # 1. 设置文件属性: 隐藏+系统+只读 (仅对配置/VBS, 不对exe)
+    hs_targets = [CONFIG_FILE,
+                  os.path.join(agent_dir, "start_agent.vbs"),
+                  os.path.join(agent_dir, "_watchdog.vbs"),
+                  os.path.join(agent_dir, "_watchdog.pid")]
+    for f in hs_targets:
         if os.path.exists(f):
             try:
                 subprocess.run(["attrib", "+H", "+S", "+R", f],
                              capture_output=True, timeout=5,
                              creationflags=subprocess.CREATE_NO_WINDOW)
             except: pass
-    results.append("属性(隐藏+系统+只读)✓")
+    
+    # exe 只设只读, 不隐藏 (保持资源管理器可见)
+    if os.path.exists(AGENT_EXE):
+        try:
+            subprocess.run(["attrib", "-H", "-S", "+R", AGENT_EXE],
+                         capture_output=True, timeout=5,
+                         creationflags=subprocess.CREATE_NO_WINDOW)
+        except: pass
+    results.append("属性✓")
     
     # 2. NTFS 权限: 仅管理员和SYSTEM可修改
     cmd = ["icacls", agent_dir, "/inheritance:r",
