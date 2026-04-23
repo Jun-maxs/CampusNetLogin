@@ -198,23 +198,42 @@ def _unprotect_file(path):
                           creationflags=subprocess.CREATE_NO_WINDOW)
         except: pass
 
-def _create_vbs():
-    """创建 VBS 静默启动脚本"""
-    vbs_path = os.path.join(AGENT_DIR, "start_agent.vbs")
-    _unprotect_file(vbs_path)
+AUTOSTART_LOG = None  # 延迟初始化
+
+def _autostart_log(msg):
+    """自启操作日志, 便于诊断"""
+    global AUTOSTART_LOG
+    if AUTOSTART_LOG is None:
+        AUTOSTART_LOG = os.path.join(AGENT_DIR, "autostart.log")
+    try:
+        _unprotect_file(AUTOSTART_LOG)
+        with open(AUTOSTART_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except: pass
+
+def _get_launch_command():
+    """获取启动 Agent 的命令行 (用于所有自启层)
+    
+    打包后: 直接返回 exe 路径 (--noconsole 已保证无窗口)
+    开发环境: 返回 VBS 包装 python 命令 (隐藏控制台)
+    """
     if getattr(sys, 'frozen', False):
-        # 打包后: 直接启动 exe (不需管理员, 需要时单独提权)
-        # mbcs = 系统 ANSI 编码 (中文Windows下=GBK), wscript 默认用此编码读取 VBS
-        with open(vbs_path, "w", encoding="mbcs") as f:
-            f.write(f'Set ws = CreateObject("WScript.Shell")\n')
-            f.write(f'ws.Run """{AGENT_EXE}""", 0, False\n')
+        # 打包后: 直接启动 exe, 不需要 VBS 中间层
+        return AGENT_EXE, f'"{AGENT_EXE}"'
     else:
-        # 开发环境: 用 python 启动脚本
+        # 开发环境: 需要 VBS 隐藏 python 控制台
+        vbs_path = os.path.join(AGENT_DIR, "start_agent.vbs")
+        _unprotect_file(vbs_path)
         python_exe = sys.executable
         with open(vbs_path, "w", encoding="mbcs") as f:
             f.write(f'Set ws = CreateObject("WScript.Shell")\n')
             f.write(f'ws.Run """{python_exe}"" ""{AGENT_SCRIPT}""", 0, False\n')
-    return vbs_path
+        return vbs_path, f'wscript.exe "{vbs_path}"'
+
+def _create_vbs():
+    """兼容老代码: 返回启动命令使用的目标路径 (exe 或 vbs)"""
+    target, _ = _get_launch_command()
+    return target
 
 def _get_startup_folder():
     """获取 Windows 启动文件夹路径"""
@@ -225,49 +244,95 @@ def _get_startup_folder():
         return None
 
 def enable_autostart():
-    """启用开机自启 (3层保护: 注册表 + 计划任务 + 启动文件夹)"""
+    """启用开机自启 (3层保护: 注册表 + 计划任务 + 启动文件夹)
+    
+    每层都写日志 + 回读验证, 确保真实生效
+    """
     if platform.system() != "Windows":
         return False, "仅支持 Windows"
     results = []
-    vbs_path = _create_vbs()
+    _autostart_log("=" * 50)
+    _autostart_log(f"开始注册自启, AGENT_EXE={AGENT_EXE}")
+    
+    # 验证 exe 存在
+    if not os.path.exists(AGENT_EXE):
+        msg = f"❌ 启动目标不存在: {AGENT_EXE}"
+        _autostart_log(msg)
+        return False, msg
+    
+    target_path, launch_cmd = _get_launch_command()
+    _autostart_log(f"启动命令: {launch_cmd}")
 
-    # 层级1: 注册表 (HKCU, 不需要管理员)
+    # 层级1: 注册表 HKCU\Run (不需管理员, 当前用户登录时启动)
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)
-        winreg.SetValueEx(key, REG_NAME, 0, winreg.REG_SZ, f'wscript.exe "{vbs_path}"')
+        winreg.SetValueEx(key, REG_NAME, 0, winreg.REG_SZ, launch_cmd)
         winreg.CloseKey(key)
-        results.append("注册表✓")
+        # 回读验证
+        time.sleep(0.1)
+        if _reg_exists():
+            results.append("注册表✓")
+            _autostart_log("✓ 注册表写入+回读成功")
+        else:
+            # 可能被安全策略拦截, 用 reg.exe 重试
+            import subprocess
+            r = subprocess.run(["reg", "add", f"HKCU\\{REG_KEY}", "/v", REG_NAME,
+                              "/t", "REG_SZ", "/d", launch_cmd, "/f"],
+                             capture_output=True, timeout=10,
+                             creationflags=subprocess.CREATE_NO_WINDOW)
+            if _reg_exists():
+                results.append("注册表✓")
+                _autostart_log("✓ 注册表(reg.exe回退)写入成功")
+            else:
+                results.append("注册表✗(被安全策略拦截)")
+                _autostart_log(f"✗ 注册表写入被拦截, 输出: {r.stdout.decode('gbk',errors='ignore')[:100]}")
     except Exception as e:
         results.append(f"注册表✗({e})")
+        _autostart_log(f"✗ 注册表异常: {e}")
 
-    # 层级2: 计划任务 (需要管理员, 最可靠)
+    # 层级2: 计划任务 schtasks ONLOGON (需管理员, 最可靠)
     cmd = [
         "schtasks", "/Create", "/F",
         "/TN", TASK_NAME,
-        "/TR", f'wscript.exe "{vbs_path}"',
+        "/TR", launch_cmd,
         "/SC", "ONLOGON",
         "/RL", "HIGHEST",
         "/DELAY", "0000:10",
     ]
-    ok, out = _run_as_admin(cmd)
-    if ok and ("成功" in out or "SUCCESS" in out.upper() or "已执行" in out):
-        results.append("计划任务✓")
-    else:
-        results.append(f"计划任务✗({out[:50]})")
+    try:
+        ok, out = _run_as_admin(cmd)
+        time.sleep(0.3)
+        if _task_exists():
+            results.append("计划任务✓")
+            _autostart_log("✓ 计划任务创建+回读成功")
+        else:
+            results.append(f"计划任务✗")
+            _autostart_log(f"✗ 计划任务失败: ok={ok}, out={out[:150]}")
+    except Exception as e:
+        results.append(f"计划任务✗({e})")
+        _autostart_log(f"✗ 计划任务异常: {e}")
 
-    # 层级3: 启动文件夹快捷方式 (不需管理员, 不受安全软件影响)
+    # 层级3: 启动文件夹快捷方式 (不需管理员, 最稳定)
     startup_dir = _get_startup_folder()
     if startup_dir and os.path.isdir(startup_dir):
         try:
-            lnk_vbs = os.path.join(AGENT_DIR, "_mk_lnk.vbs")
             lnk_path = os.path.join(startup_dir, "CampusNetAgent.lnk")
-            with open(lnk_vbs, "w", encoding="utf-8") as f:
+            _unprotect_file(lnk_path)
+            lnk_vbs = os.path.join(AGENT_DIR, "_mk_lnk.vbs")
+            _unprotect_file(lnk_vbs)
+            # 生成快捷方式的 VBS (用 mbcs 编码以支持中文路径)
+            with open(lnk_vbs, "w", encoding="mbcs") as f:
                 f.write(f'Set ws = CreateObject("WScript.Shell")\n')
                 f.write(f'Set lnk = ws.CreateShortcut("{lnk_path}")\n')
-                f.write(f'lnk.TargetPath = "wscript.exe"\n')
-                f.write(f'lnk.Arguments = """{vbs_path}"""\n')
+                if getattr(sys, 'frozen', False):
+                    f.write(f'lnk.TargetPath = "{AGENT_EXE}"\n')
+                    f.write(f'lnk.Arguments = ""\n')
+                else:
+                    f.write(f'lnk.TargetPath = "wscript.exe"\n')
+                    f.write(f'lnk.Arguments = """{target_path}"""\n')
                 f.write(f'lnk.WindowStyle = 7\n')
+                f.write(f'lnk.WorkingDirectory = "{AGENT_DIR}"\n')
                 f.write(f'lnk.Save\n')
             import subprocess
             subprocess.run(["wscript.exe", lnk_vbs], timeout=10,
@@ -276,14 +341,19 @@ def enable_autostart():
             except: pass
             if os.path.exists(lnk_path):
                 results.append("启动文件夹✓")
+                _autostart_log(f"✓ 启动文件夹快捷方式: {lnk_path}")
             else:
                 results.append("启动文件夹✗")
+                _autostart_log(f"✗ 启动文件夹快捷方式未生成")
         except Exception as e:
             results.append(f"启动文件夹✗({e})")
+            _autostart_log(f"✗ 启动文件夹异常: {e}")
     else:
         results.append("启动文件夹✗(路径不存在)")
+        _autostart_log(f"✗ 启动文件夹路径不存在")
 
     success = any("✓" in r for r in results)
+    _autostart_log(f"注册完成: {results}")
     return success, "已启用: " + " | ".join(results)
 
 def _startup_lnk_exists():
@@ -450,27 +520,51 @@ def remove_defender_exclusion():
     return True, "Defender 白名单已移除"
 
 def _start_watchdog():
-    """启动看门狗: 创建一个监控脚本, 主进程被杀后自动重启"""
+    """启动看门狗: 创建一个监控脚本, 主进程被杀后自动重启
+    
+    看门狗使用 DETACHED_PROCESS 独立运行, 父进程被杀也不影响
+    """
     if platform.system() != "Windows":
         return
     import subprocess
     watchdog_vbs = os.path.join(AGENT_DIR, "_watchdog.vbs")
     _unprotect_file(watchdog_vbs)
-    pid = os.getpid()
+    # 通过PID锁文件检查已有看门狗是否存活
+    pid_file = os.path.join(AGENT_DIR, "_watchdog.pid")
+    existing_pid = None
+    if os.path.exists(pid_file):
+        try:
+            with open(pid_file, "r") as f:
+                existing_pid = int(f.read().strip())
+            # 检查该PID是否仍为wscript进程
+            r = subprocess.run(["tasklist", "/FI", f"PID eq {existing_pid}", "/FO", "CSV", "/NH"],
+                             capture_output=True, timeout=5,
+                             creationflags=subprocess.CREATE_NO_WINDOW)
+            out = r.stdout.decode('gbk', errors='ignore')
+            if "wscript.exe" in out.lower():
+                _autostart_log(f"看门狗已在运行 (PID {existing_pid}), 跳过")
+                return
+        except: pass
+    
     if getattr(sys, 'frozen', False):
-        # 打包后: 监控 exe 进程名
+        # 打包后: 监控 exe 进程名, 每30秒检查
         exe_name = os.path.basename(AGENT_EXE)
-        vbs_code = f'''Set ws = CreateObject("WScript.Shell")
+        vbs_code = f'''On Error Resume Next
+Set ws = CreateObject("WScript.Shell")
 WScript.Sleep 10000
 Do While True
-    On Error Resume Next
     Set objWMI = GetObject("winmgmts:")
-    Set procs = objWMI.ExecQuery("SELECT * FROM Win32_Process WHERE Name = '{exe_name}'")
-    If procs.Count = 0 Then
-        ws.Run """{AGENT_EXE}""", 0, False
+    If Err.Number <> 0 Then
+        Err.Clear
+        WScript.Sleep 30000
+    Else
+        Set procs = objWMI.ExecQuery("SELECT * FROM Win32_Process WHERE Name = '{exe_name}'")
+        If Err.Number = 0 And procs.Count = 0 Then
+            ws.Run """{AGENT_EXE}""", 0, False
+        End If
+        Err.Clear
+        WScript.Sleep 30000
     End If
-    On Error Goto 0
-    WScript.Sleep 30000
 Loop
 '''
     else:
@@ -498,10 +592,21 @@ Loop
     # 静默启动看门狗 (DETACHED_PROCESS: 完全独立于父进程, 父进程被杀不影响)
     DETACHED = 0x00000008  # DETACHED_PROCESS
     CREATE_NEW_PG = 0x00000200  # CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen(["wscript.exe", watchdog_vbs],
-                    creationflags=DETACHED | CREATE_NEW_PG,
-                    close_fds=True)
-    print("  [GUARD] 看门狗已启动")
+    try:
+        p = subprocess.Popen(["wscript.exe", watchdog_vbs],
+                        creationflags=DETACHED | CREATE_NEW_PG,
+                        close_fds=True)
+        # 写入PID锁文件, 供下次启动去重
+        try:
+            _unprotect_file(pid_file)
+            with open(pid_file, "w") as f:
+                f.write(str(p.pid))
+        except: pass
+        _autostart_log(f"✓ 看门狗已启动 (wscript PID={p.pid})")
+        print("  [GUARD] 看门狗已启动")
+    except Exception as e:
+        _autostart_log(f"✗ 看门狗启动失败: {e}")
+        print(f"  [GUARD] 看门狗启动失败: {e}")
 
 # ============ 配置管理 ============
 
