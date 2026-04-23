@@ -728,7 +728,11 @@ def set_dns_hijack(primary_dns, secondary_dns=""):
     return ok_count > 0, f"DNS→{primary_dns} | {' '.join(results)}"
 
 def reset_dns():
-    """恢复所有活动网卡 DNS 为自动获取 (DHCP) (静默)"""
+    """恢复所有活动网卡 DNS 为自动获取 (DHCP) (静默)
+    
+    使用 netsh 设置 DHCP 源 (比 PowerShell -ResetServerAddresses 更可靠,
+    后者在某些机器上会导致 DNS 为空而非真正的 DHCP)
+    """
     if platform.system() != "Windows":
         return False, "仅支持 Windows"
     import subprocess
@@ -746,16 +750,25 @@ def reset_dns():
     
     results = []
     for adapter in adapters:
-        cmd = ["powershell", "-NoProfile", "-Command",
-               f'Set-DnsClientServerAddress -InterfaceAlias "{adapter}" -ResetServerAddresses']
+        # 方法1: netsh 设置 DNS 来源为 DHCP (最可靠)
+        cmd_netsh = ["netsh", "interface", "ip", "set", "dns",
+                     f"name={adapter}", "source=dhcp"]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10,
+            r = subprocess.run(cmd_netsh, capture_output=True, text=True, timeout=10,
                               creationflags=subprocess.CREATE_NO_WINDOW)
             if r.returncode == 0:
                 results.append(f"{adapter}:✓")
             else:
-                ok, out = _run_as_admin(cmd)
-                results.append(f"{adapter}:{'✓' if ok else '✗'}")
+                # 回退: 管理员权限执行 netsh
+                ok, out = _run_as_admin(cmd_netsh)
+                if ok:
+                    results.append(f"{adapter}:✓")
+                else:
+                    # 最后手段: PowerShell ResetServerAddresses
+                    cmd_ps = ["powershell", "-NoProfile", "-Command",
+                              f'Set-DnsClientServerAddress -InterfaceAlias "{adapter}" -ResetServerAddresses']
+                    ok2, out2 = _run_as_admin(cmd_ps)
+                    results.append(f"{adapter}:{'✓' if ok2 else '✗'}")
         except:
             results.append(f"{adapter}:err")
     
@@ -1783,8 +1796,14 @@ def run_self_test(agent, S):
     try:
         dns_hijacked, dns_servers = get_dns_status()
         dns_blocked = os.path.exists(_DNS_BACKUP_FILE)
-        if dns_hijacked:
+        # 常见公共DNS不算异常 (虽然是静态但可能是用户自行设置的)
+        _KNOWN_PUBLIC_DNS = {"8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1",
+                             "223.5.5.5", "223.6.6.6", "114.114.114.114", "119.29.29.29"}
+        is_known = dns_servers and all(s.strip() in _KNOWN_PUBLIC_DNS for s in dns_servers.split(","))
+        if dns_hijacked and not is_known:
             FAIL(6, f"DNS异常! 当前: {dns_servers} | DNS断网: {'是' if dns_blocked else '否'}")
+        elif dns_hijacked and is_known:
+            INFO(6, f"DNS: 静态({dns_servers}) 公共DNS | DNS断网: {'是' if dns_blocked else '否'}")
         else:
             OK(6, f"DNS正常: {dns_servers or 'DHCP自动'} | DNS断网: {'是' if dns_blocked else '否'}")
     except Exception as e:
@@ -2027,16 +2046,26 @@ def run_self_test(agent, S):
     if is_win:
         try:
             ok_rst, msg_rst = reset_dns()
-            if ok_rst:
-                rc, cur_dns, _ = _diag_ps(
-                    "Get-DnsClientServerAddress -AddressFamily IPv4 | "
-                    "Where-Object {$_.ServerAddresses} | "
-                    "Select-Object -First 1 -ExpandProperty ServerAddresses")
-                OK(21, f"DNS恢复成功: {msg_rst} | 当前DNS: {cur_dns[:40] or 'DHCP'}")
+            time.sleep(1)  # 等 Windows 网络栈更新
+            rc, cur_dns, _ = _diag_ps(
+                "Get-DnsClientServerAddress -AddressFamily IPv4 | "
+                "Where-Object {$_.ServerAddresses} | "
+                "Select-Object -First 1 -ExpandProperty ServerAddresses")
+            cur_dns = (cur_dns or "").strip()
+            if ok_rst and cur_dns:
+                OK(21, f"DNS恢复成功: {msg_rst} | 当前DNS: {cur_dns[:40]}")
+            elif ok_rst and not cur_dns:
+                # reset 成功但 DNS 为空 → 兜底设公共DNS防断网
+                set_dns_hijack("223.5.5.5", "114.114.114.114")
+                FAIL(21, f"DNS恢复后为空! 已兜底设为223.5.5.5 | {msg_rst}")
             else:
-                FAIL(21, f"DNS恢复失败: {msg_rst}")
+                # reset 失败 → 兜底
+                set_dns_hijack("223.5.5.5", "114.114.114.114")
+                FAIL(21, f"DNS恢复失败, 已兜底: {msg_rst}")
         except Exception as e:
-            FAIL(21, f"DNS恢复测试异常: {e}")
+            try: set_dns_hijack("223.5.5.5", "114.114.114.114")
+            except: pass
+            FAIL(21, f"DNS恢复测试异常(已兜底): {e}")
     else:
         INFO(21, "非Windows, 跳过")
 
