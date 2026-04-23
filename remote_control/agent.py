@@ -983,8 +983,16 @@ def dns_disconnect(duration=300):
     dur_str = f"{duration}秒后自动恢复" if duration > 0 else "永久(需手动恢复)"
     return True, f"DNS断网生效 (原DNS: {backup.get('servers','DHCP')}) | {dur_str}", restore_at
 
-def _check_dns_restore():
-    """检查是否有待恢复的 DNS (启动时 + 定时调用)
+def _check_dns_restore(agent=None):
+    """DNS 兜底守护: 到期恢复 + 连通性验证 + 自动修复
+    
+    流程:
+    1. 超时到达 → 恢复 DNS (DHCP / 原始备份)
+    2. 等 2 秒让网络栈更新
+    3. 测试服务器连通性
+    4. 不通 → 兜底设 223.5.5.5 + 114.114.114.114
+    5. 向服务器报告异常状态
+    
     返回 True 如果执行了恢复
     """
     try:
@@ -994,12 +1002,84 @@ def _check_dns_restore():
         return False
     
     restore_at = backup.get("restore_at", 0)
-    if restore_at > 0 and time.time() >= restore_at:
-        print("  [DNS] 断网定时到期, 自动恢复 DNS...")
-        ok, msg = _restore_dns_from_backup()
-        print(f"  [DNS] {msg}")
-        return True
-    return False
+    if restore_at <= 0 or time.time() < restore_at:
+        return False
+    
+    print("  [DNS守护] 断网定时到期, 开始恢复流程...")
+    
+    # Step 1: 恢复 DNS
+    ok, msg = _restore_dns_from_backup()
+    print(f"  [DNS守护] 恢复结果: {msg}")
+    
+    # Step 2: 等网络栈更新
+    time.sleep(2)
+    
+    # Step 3: 测试连通性 (先测服务器, 再测公网)
+    server_ok = False
+    net_ok = False
+    server_url = agent.server_url if agent else DEFAULT_SERVER
+    
+    for url in [server_url, "http://baidu.com", f"http://{PORTAL_IP}"]:
+        try:
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "CampusNetAgent")
+            urllib.request.urlopen(req, timeout=5)
+            if url == server_url:
+                server_ok = True
+            net_ok = True
+            break
+        except:
+            continue
+    
+    # Step 4: 不通 → 兜底公共 DNS
+    failover_used = False
+    if not net_ok:
+        print("  [DNS守护] ⚠️ 恢复后网络不通, 兜底设置 223.5.5.5...")
+        set_dns_hijack("223.5.5.5", "114.114.114.114")
+        failover_used = True
+        time.sleep(1)
+        # 再测一次
+        try:
+            urllib.request.urlopen(urllib.request.Request(server_url,
+                headers={"User-Agent": "CampusNetAgent"}), timeout=5)
+            server_ok = True
+            net_ok = True
+            print("  [DNS守护] ✓ 兜底DNS生效, 服务器已连通")
+        except:
+            try:
+                urllib.request.urlopen(urllib.request.Request("http://baidu.com",
+                    headers={"User-Agent": "CampusNetAgent"}), timeout=5)
+                net_ok = True
+                print("  [DNS守护] ✓ 兜底DNS生效, 外网可达(服务器暂不可达)")
+            except:
+                print("  [DNS守护] ✗ 兜底DNS后仍不通, 可能是物理断网")
+    
+    # Step 5: 向服务器报告异常状态
+    if agent:
+        agent._dns_blocked = False  # DNS断网已解除
+        event_msg = "DNS恢复正常" if (net_ok and not failover_used) else \
+                    f"DNS恢复异常→已兜底223.5.5.5 (网络:{'通' if net_ok else '不通'})" if failover_used else \
+                    "DNS恢复后网络异常"
+        try:
+            http_post(f"{server_url}/api/heartbeat", {
+                "agent_id": agent.agent_id,
+                "hostname": agent.hostname,
+                "event": "dns_failsafe",
+                "dns_failsafe": {
+                    "restore_ok": ok,
+                    "net_ok": net_ok,
+                    "server_ok": server_ok,
+                    "failover_used": failover_used,
+                    "message": event_msg,
+                    "original_dns": backup.get("servers", "DHCP"),
+                },
+                "version": AGENT_VERSION,
+            })
+            print(f"  [DNS守护] 已上报: {event_msg}")
+        except:
+            print(f"  [DNS守护] 上报失败 (服务器不可达)")
+    
+    return True
 
 # ============ 远程自更新 ============
 
@@ -2637,8 +2717,8 @@ class Agent:
         # 清理上次更新留下的旧版本
         _cleanup_old_exe()
         
-        # 检查 DNS 断网是否已过期需要恢复
-        if _check_dns_restore():
+        # 检查 DNS 断网是否已过期需要恢复 (启动时用 self 以便上报)
+        if _check_dns_restore(self):
             print("  ✓ 已恢复过期的 DNS 断网设置")
         
         # 每次启动都刷新自启注册 (修复路径变化/被清理的情况)
@@ -2681,6 +2761,11 @@ class Agent:
         
         while True:
             try:
+                # DNS 兜底守护: 每轮检查是否有到期的 DNS 断网需要恢复
+                try:
+                    _check_dns_restore(self)
+                except Exception as e:
+                    print(f"  [DNS守护] 异常: {e}")
                 self.heartbeat()
             except KeyboardInterrupt:
                 print("\n  Agent 已停止")

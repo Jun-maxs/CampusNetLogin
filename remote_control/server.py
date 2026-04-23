@@ -129,6 +129,10 @@ def heartbeat():
             _add_history(aid, "首次连接", f"主机: {data.get('hostname','')} IP: {data.get('local_ip','')}")
         elif event == "boot":
             _add_history(aid, "🟢 设备开机", f"主机: {data.get('hostname','')} IP: {data.get('local_ip','')} v{data.get('version','?')}")
+        elif event == "dns_failsafe":
+            fs = data.get("dns_failsafe", {})
+            icon = "✅" if fs.get("net_ok") and not fs.get("failover_used") else "⚠️"
+            _add_history(aid, f"{icon} DNS守护", fs.get("message", "DNS恢复"))
         elif not was_alive:
             _add_history(aid, "重新上线", f"IP: {data.get('local_ip','')}")
     return jsonify({"commands": pending})
