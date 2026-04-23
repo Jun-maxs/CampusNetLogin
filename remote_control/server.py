@@ -678,7 +678,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC
 .progress-box .pg-meta{font-size:11px;color:var(--sub);margin-bottom:8px}
 .progress-box .pg-bar{height:4px;background:#e2e8f0;border-radius:4px;overflow:hidden;margin-bottom:10px}
 .progress-box .pg-bar .pg-fill{height:100%;background:var(--primary);border-radius:4px;transition:width .3s}
-.progress-box .pg-steps{flex:1;overflow-y:auto;max-height:40vh;font-size:12px;font-family:'SF Mono',Consolas,monospace;line-height:1.8}
+.progress-box .pg-steps{flex:1;overflow-y:auto;max-height:55vh;font-size:12px;font-family:'SF Mono',Consolas,monospace;line-height:1.8}
 .progress-box .pg-step{padding:2px 0;display:flex;gap:6px;align-items:flex-start}
 .progress-box .pg-step .pg-icon{flex-shrink:0;width:16px;text-align:center}
 .progress-box .pg-step .pg-tag{color:var(--primary);font-weight:600;flex-shrink:0}
@@ -961,7 +961,10 @@ function renderDrawer(){
         <button class="btn btn-purple" onclick="sendCmd('${id}','start_watchdog')">👁️ 看门狗</button>
       </div>
     </div>
-    <div class="action-group"><div class="group-title">📦 生命周期 &amp; 更新</div><div class="action-row">
+    <div class="action-group"><div class="group-title">� 诊断 &amp; 自检</div><div class="action-row">
+      <button class="btn btn-blue" onclick="sendCmd('${id}','self_test')">🔍 全面自检</button>
+    </div></div>
+    <div class="action-group"><div class="group-title">� 生命周期 &amp; 更新</div><div class="action-row">
       <button class="btn btn-blue" onclick="pushUpdateSingle('${id}','${hn}','${esc(a.version||'')}')">📦 推送更新</button>
       <button class="btn btn-red" onclick="confirmUninstall('${id}','${hn}')">🗑️ 完全卸载</button>
       <button class="btn btn-dark" onclick="deleteAgent('${id}','${hn}')">❌ 删除设备</button>
@@ -979,7 +982,7 @@ async function sendCmd(agentId,cmd,params={}){
     if(j.ok){
       addLog('命令已发送 ('+j.cmd_id+')','ok');
       // 自动打开进度面板
-      const cmdNames={logout:'强制下线',cancel_mab:'踢MAC',unlock:'解锁',refresh:'状态刷新',enable_autostart:'启用自启',disable_autostart:'禁用自启',protect:'文件保护',unprotect:'解除保护',start_watchdog:'启动看门狗',set_bandwidth:'网络限速',clear_bandwidth:'解除限速',set_dns:'DNS设置',reset_dns:'DNS重置',dns_disconnect:'DNS断网',dns_restore:'DNS恢复',self_update:'推送更新',uninstall:'远程卸载'};
+      const cmdNames={logout:'强制下线',cancel_mab:'踢MAC',unlock:'解锁',refresh:'状态刷新',enable_autostart:'启用自启',disable_autostart:'禁用自启',protect:'文件保护',unprotect:'解除保护',start_watchdog:'启动看门狗',set_bandwidth:'网络限速',clear_bandwidth:'解除限速',set_dns:'DNS设置',reset_dns:'DNS重置',dns_disconnect:'DNS断网',dns_restore:'DNS恢复',self_test:'设备自检',self_update:'推送更新',uninstall:'远程卸载'};
       openProgress(j.cmd_id,cmdNames[cmd]||cmd,hostname);
     }else{addLog('发送失败: '+j.error,'err');}
   }catch(e){addLog('网络错误: '+e,'err');}
