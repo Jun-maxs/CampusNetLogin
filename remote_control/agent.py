@@ -12,7 +12,7 @@ import urllib.request, urllib.parse, urllib.error
 _S = b'aHR0cHM6Ly95dWFuYWkuYmVzdC9neWs='  # https://yuanai.best/gyk
 DEFAULT_SERVER = base64.b64decode(_S).decode()
 PORTAL_IP = "10.228.9.7"
-AGENT_VERSION = "1.51"  # 版本号, 每次更新递增
+AGENT_VERSION = "1.52"  # 版本号, 每次更新递增
 # API 鉴权密钥 (服务器和客户端必须一致)
 API_SECRET = "CampusNet@2026#Secure"
 HEARTBEAT_INTERVAL = 5  # 心跳间隔(秒)
@@ -565,9 +565,10 @@ def set_bandwidth_limit(rate_kbps):
     """设置带宽限制 (静默, 无弹窗)
     
     多策略组合限速 (上传+下载):
-    1. QoS 策略限制出站 (上传)
-    2. TCP 接收窗口限制入站 (下载)
-    3. 网卡 Flow Control 辅助
+    1. 启用网卡 QoS Packet Scheduler (前置条件)
+    2. QoS 策略限制出站 (上传)
+    3. TCP 接收窗口限制入站 (下载)
+    4. GPO 注册表 QoS + gpupdate 生效
     rate_kbps: 限速值, 单位 KB/s (例如 100 = 100KB/s)
     """
     if platform.system() != "Windows":
@@ -576,54 +577,28 @@ def set_bandwidth_limit(rate_kbps):
     rate_bps = rate_kbps * 8 * 1000  # KB/s → bits/s
     results = []
     
-    # --- 策略1: QoS 出站限速 ---
-    ps_qos = (
+    # 所有策略合并为一个管理员 PowerShell 脚本, 避免多次 UAC 弹窗
+    ps_all = (
+        # --- 前置: 启用所有网卡的 QoS Packet Scheduler ---
+        'try { Enable-NetAdapterBinding -Name "*" -ComponentID ms_pacer -EA SilentlyContinue } catch {}; '
+        
+        # --- 策略1: QoS 出站限速 ---
         f'Remove-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -Confirm:$false -EA SilentlyContinue; '
         f'New-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -IPProtocolMatchCondition Both '
-        f'-ThrottleRateActionBitsPerSecond {rate_bps} -PolicyStore ActiveStore'
+        f'-ThrottleRateActionBitsPerSecond {rate_bps} -PolicyStore ActiveStore; '
+        
+        # --- 策略2: TCP 接收窗口限制 (限下载) ---
+        'netsh interface tcp set global autotuninglevel='
     )
-    rc, out, err = _ps_run(ps_qos)
-    if rc == 0:
-        results.append("QoS出站✓")
+    if rate_kbps <= 100:
+        ps_all += 'disabled; '
+    elif rate_kbps <= 500:
+        ps_all += 'highlyrestricted; '
     else:
-        ok, _ = _ps_admin(ps_qos)
-        results.append("QoS出站✓(admin)" if ok else "QoS出站✗")
+        ps_all += 'restricted; '
     
-    # --- 策略2: TCP 接收窗口限制 (关键: 限下载速度) ---
-    # autotuning=disabled 强制使用默认小窗口, 大幅降低下载速度
-    # 同时设置较小的 initialRto 增加拥塞敏感度
-    ps_tcp = (
-        'netsh interface tcp set global autotuninglevel=disabled; '
-        'netsh interface tcp set global congestionprovider=none; '
-    )
-    # 根据限速值动态计算 TCP 窗口大小
-    # TCP 窗口决定了在 RTT 内能接收的最大数据量
-    # 窗口 = 速率 * RTT, 假设 RTT=50ms, 留一定余量
-    if rate_kbps <= 50:
-        ps_tcp += 'netsh interface tcp set global autotuninglevel=disabled'
-    elif rate_kbps <= 200:
-        ps_tcp += 'netsh interface tcp set global autotuninglevel=highlyrestricted'
-    elif rate_kbps <= 1000:
-        ps_tcp += 'netsh interface tcp set global autotuninglevel=restricted'
-    else:
-        ps_tcp += 'netsh interface tcp set global autotuninglevel=restricted'
-    
-    rc2, _, _ = _ps_run(ps_tcp)
-    if rc2 != 0:
-        _ps_admin(ps_tcp)
-    results.append("TCP窗口✓")
-    
-    # --- 策略3: 为所有活动网卡添加 QoS 限速 (入站+出站) ---
-    # 使用 Windows Firewall + BITS 配合
-    ps_fw = (
-        # 添加 Windows 防火墙出站规则限制带宽密集端口
-        f'$rate={rate_bps}; '
-        # 设置 BITS 最大带宽
-        f'$gpo = "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\BITS"; '
-        f'New-Item -Path $gpo -Force -EA SilentlyContinue | Out-Null; '
-        f'Set-ItemProperty -Path $gpo -Name "MaxBandwidthServed" -Value {rate_kbps} -Type DWord -Force -EA SilentlyContinue; '
-        f'Set-ItemProperty -Path $gpo -Name "MaxTransferRate" -Value {rate_kbps} -Type DWord -Force -EA SilentlyContinue; '
-        # 组策略 QoS (注册表方式, 同时限制入站和出站)
+    ps_all += (
+        # --- 策略3: GPO 注册表 QoS (覆盖面更广) ---
         f'$qp = "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\{BANDWIDTH_POLICY_NAME}"; '
         f'New-Item -Path $qp -Force -EA SilentlyContinue | Out-Null; '
         f'Set-ItemProperty -Path $qp -Name "Version" -Value "1.0" -Force; '
@@ -636,12 +611,24 @@ def set_bandwidth_limit(rate_kbps):
         f'Set-ItemProperty -Path $qp -Name "Remote IP" -Value "*" -Force; '
         f'Set-ItemProperty -Path $qp -Name "Remote IP Prefix Length" -Value "*" -Force; '
         f'Set-ItemProperty -Path $qp -Name "DSCP Value" -Value "-1" -Force; '
-        f'Set-ItemProperty -Path $qp -Name "Throttle Rate" -Value "{rate_bps}" -Force'
+        f'Set-ItemProperty -Path $qp -Name "Throttle Rate" -Value "{rate_bps}" -Force; '
+        # --- 关键: 立即刷新组策略使其生效 ---
+        'gpupdate /force /wait:0 2>$null; '
+        # --- 验证 ---
+        f'$p = Get-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -PolicyStore ActiveStore -EA SilentlyContinue; '
+        'if($p){ Write-Output "VERIFY_OK" } else { Write-Output "VERIFY_FAIL" }'
     )
-    rc3, _, _ = _ps_run(ps_fw)
-    if rc3 != 0:
-        _ps_admin(ps_fw)
-    results.append("GPO-QoS✓")
+    
+    # 直接用管理员权限执行 (QoS/netsh/注册表都需要admin)
+    rc, out, err = _ps_run(ps_all)
+    if rc != 0 or 'VERIFY_OK' not in out:
+        ok, admin_out = _ps_admin(ps_all)
+        results.append("admin✓" if ok else "admin✗")
+    else:
+        results.append("direct✓")
+    
+    if 'VERIFY_OK' in out or 'VERIFY_OK' in str(results):
+        results.append("QoS验证✓")
     
     # 保存状态
     try:
@@ -659,9 +646,8 @@ def clear_bandwidth_limit():
     ps_clear = (
         f'Remove-NetQosPolicy -Name "{BANDWIDTH_POLICY_NAME}" -Confirm:$false -EA SilentlyContinue; '
         f'netsh interface tcp set global autotuninglevel=normal; '
-        f'netsh interface tcp set global congestionprovider=default; '
         f'Remove-Item -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\{BANDWIDTH_POLICY_NAME}" -Recurse -Force -EA SilentlyContinue; '
-        f'Remove-Item -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\BITS" -Recurse -Force -EA SilentlyContinue'
+        f'gpupdate /force /wait:0 2>$null'
     )
     rc, _, _ = _ps_run(ps_clear)
     if rc != 0:
@@ -669,7 +655,7 @@ def clear_bandwidth_limit():
     try:
         os.remove(_BW_STATE_FILE)
     except: pass
-    return True, "所有限速已解除 (QoS+TCP窗口+GPO)"
+    return True, "所有限速已解除"
 
 def get_bandwidth_limit():
     """查询当前限速值, 返回 KB/s 或 0 (无限速)"""
