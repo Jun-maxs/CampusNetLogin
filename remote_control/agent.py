@@ -810,15 +810,15 @@ class CampusNet:
         except Exception as e:
             return {"result": "fail", "message": str(e)}
 
-    def _refresh_user_index(self):
-        """强制刷新 user_index (不依赖缓存, 通过 IP + cookie 查询 portal)
+    def _refresh_user_index(self, force=False):
+        """从 portal 实时获取当前登录用户 (不依赖缓存)
         
+        force=True 时: 强制覆盖 user_index/username (用于下发命令前, 避免用旧缓存)
         关键: 锐捷portal需要JSESSIONID cookie才能识别身份
-        先GET首页获取cookie, 再带cookie POST getOnlineUserInfo
         """
         try:
             import http.cookiejar
-            # 1. 建立带cookie jar的opener
+            # 1. 建立带cookie jar的opener (每次新建, 不复用)
             jar = http.cookiejar.CookieJar()
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
             # 2. 先GET首页让portal set JSESSIONID cookie
@@ -837,29 +837,32 @@ class CampusNet:
                 uid = info.get("userId", "")
                 if ui:
                     self.user_index = ui
-                    if name and not self.username:
-                        self.username = name
-                    if uid and not self.username:
-                        self.username = uid
-                    # 保存cookie jar给其他请求复用
+                    # force=True 或原来就没有: 强制覆盖为 portal 最新返回值
+                    if force or not self.username:
+                        self.username = name or uid or self.username
+                    # 保存cookie opener给后续请求复用
                     self._cookie_jar = jar
                     self._cookie_opener = opener
-                    print(f"  [NET] 刷新 user_index 成功: {ui[:16]}... (user={name or uid})")
+                    print(f"  [NET] 刷新成功: user={name or uid}, index={ui[:16]}...")
                     return True
                 else:
-                    print(f"  [NET] 刷新 user_index: portal 无返回 ({info.get('message','')})")
+                    print(f"  [NET] 刷新失败: {info.get('message','未知')}")
         except Exception as e:
-            print(f"  [NET] 刷新 user_index 异常: {e}")
+            print(f"  [NET] 刷新异常: {e}")
         return False
 
     def full_logout(self):
         """完整下线: 取消无感认证 + 注销
         
-        关键: 先刷新 user_index (可能过期或为空)
+        关键: 强制清空缓存 + 从 portal 实时获取当前登录用户
+        保证每次下发命令操作的都是当前真实登录用户, 不会误操作
         """
         results = []
-        # 0. 先刷新 user_index (防止过期/空值导致全部失败)
-        refreshed = self._refresh_user_index()
+        # 0. 清空缓存, 强制从 portal 实时获取
+        self.user_index = ""
+        self.username = ""
+        self._cookie_opener = None
+        refreshed = self._refresh_user_index(force=True)
         if not self.user_index:
             return {"result": "fail",
                     "message": f"无法获取 user_index (可能设备已离线或不在校园网内)"}
@@ -1018,10 +1021,25 @@ class Agent:
                     message += " | 强制离线(永久,发送unlock解锁)"
 
             elif command == "cancel_mab":
-                r1 = self.net.cancel_mab()
-                r2 = self.net.cancel_mac_by_name()
-                success = r1.get("result")=="success" or r2.get("result")=="success"
-                message = f"cancelMab:{r1.get('result','')} cancelMac:{r2.get('result','')}"
+                # 清缓存, 强制从 portal 实时获取当前登录用户
+                self.net.user_index = ""
+                self.net.username = ""
+                self.net._cookie_opener = None
+                self.net._refresh_user_index(force=True)
+                if not self.net.user_index:
+                    success = False
+                    message = "无法获取 user_index (设备已离线或不在校园网内)"
+                else:
+                    r1 = self.net.cancel_mab()
+                    r2 = self.net.cancel_mac_by_name()
+                    success = r1.get("result")=="success" or r2.get("result")=="success"
+                    message = f"cancelMab:{r1.get('result','?')} cancelMac:{r2.get('result','?')}"
+                    if not success:
+                        details = []
+                        if r1.get("message"): details.append(f"[Mab]{r1['message'][:60]}")
+                        if r2.get("message"): details.append(f"[Mac]{r2['message'][:60]}")
+                        if details:
+                            message += " | " + " ".join(details)
 
             elif command == "unlock":
                 self.force_offline = False
