@@ -270,11 +270,13 @@ def _cache_exe(src_path, version):
     versioned = os.path.join(UPLOAD_DIR, f"CampusNetAgent_v{version}.exe")
     latest = os.path.join(UPLOAD_DIR, "CampusNetAgent.exe")
     shutil.copy2(src_path, versioned)
+    os.chmod(versioned, 0o644)
     # 更新 latest
     try:
         if os.path.islink(latest) or os.path.exists(latest):
             os.remove(latest)
         shutil.copy2(versioned, latest)
+        os.chmod(latest, 0o644)
     except: pass
     _cleanup_old_versions()
 
@@ -377,9 +379,11 @@ def push_update():
         return jsonify({"error": "未上传任何版本的 exe"}), 400
     
     exe_filename = os.path.basename(exe_path)
-    host = request.host
-    scheme = request.scheme
-    download_url = data.get("url", f"{scheme}://{host}/download/{exe_filename}")
+    # 使用 nginx 转发的真实 Host, 并加上 /gyk 前缀
+    host = request.headers.get("X-Forwarded-Host", request.headers.get("Host", request.host))
+    scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+    prefix = "/gyk" if "yuanai.best" in host else ""
+    download_url = data.get("url", f"{scheme}://{host}{prefix}/download/{exe_filename}")
     
     count = 0
     skipped = 0
