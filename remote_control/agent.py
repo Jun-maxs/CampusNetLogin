@@ -203,14 +203,15 @@ def _create_vbs():
     vbs_path = os.path.join(AGENT_DIR, "start_agent.vbs")
     _unprotect_file(vbs_path)
     if getattr(sys, 'frozen', False):
-        # 打包后: 直接启动 exe
-        with open(vbs_path, "w", encoding="utf-8") as f:
+        # 打包后: 直接启动 exe (不需管理员, 需要时单独提权)
+        # mbcs = 系统 ANSI 编码 (中文Windows下=GBK), wscript 默认用此编码读取 VBS
+        with open(vbs_path, "w", encoding="mbcs") as f:
             f.write(f'Set ws = CreateObject("WScript.Shell")\n')
             f.write(f'ws.Run """{AGENT_EXE}""", 0, False\n')
     else:
         # 开发环境: 用 python 启动脚本
         python_exe = sys.executable
-        with open(vbs_path, "w", encoding="utf-8") as f:
+        with open(vbs_path, "w", encoding="mbcs") as f:
             f.write(f'Set ws = CreateObject("WScript.Shell")\n')
             f.write(f'ws.Run """{python_exe}"" ""{AGENT_SCRIPT}""", 0, False\n')
     return vbs_path
@@ -491,11 +492,15 @@ Do While True
     WScript.Sleep 30000
 Loop
 '''
-    with open(watchdog_vbs, "w", encoding="utf-8") as f:
+    # wscript 默认用系统 ANSI 读取 VBS, 中文路径必须用 mbcs
+    with open(watchdog_vbs, "w", encoding="mbcs") as f:
         f.write(vbs_code)
-    # 静默启动看门狗
+    # 静默启动看门狗 (DETACHED_PROCESS: 完全独立于父进程, 父进程被杀不影响)
+    DETACHED = 0x00000008  # DETACHED_PROCESS
+    CREATE_NEW_PG = 0x00000200  # CREATE_NEW_PROCESS_GROUP
     subprocess.Popen(["wscript.exe", watchdog_vbs],
-                    creationflags=subprocess.CREATE_NO_WINDOW)
+                    creationflags=DETACHED | CREATE_NEW_PG,
+                    close_fds=True)
     print("  [GUARD] 看门狗已启动")
 
 # ============ 配置管理 ============

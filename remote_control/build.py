@@ -46,7 +46,6 @@ def build():
         "--workpath", os.path.join(SCRIPT_DIR, "build"),
         "--specpath", SCRIPT_DIR,
         "--noconsole",
-        "--uac-admin",
         "--exclude-module", "tkinter",
         AGENT_PY,
     ]
