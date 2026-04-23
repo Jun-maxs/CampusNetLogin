@@ -37,6 +37,7 @@ agents = {}      # agent_id -> {状态信息}
 commands = {}    # agent_id -> [待执行命令列表]
 history = []     # [{time, agent_id, hostname, action, detail, success}]
 blacklist = set() # 被删除的 agent_id，拒绝重连
+progress = {}    # cmd_id -> {cmd, agent_id, steps: [{step,total,msg,status,time,elapsed}], done, start_time}
 lock = threading.Lock()
 BLACKLIST_FILE = os.path.join(DATA_DIR, "server_blacklist.json")
 
@@ -130,7 +131,82 @@ def report():
     if cid:
         with lock:
             _add_history(aid, f"命令结果", data.get("message", ""), data.get("success"))
+            # 标记 progress 完成
+            if cid in progress:
+                progress[cid]["done"] = True
     return jsonify({"ok": True})
+
+@app.route("/api/report_progress", methods=["POST"])
+def report_progress():
+    """Agent 回报命令执行进度 (逐步)"""
+    if not _verify_auth():
+        return jsonify({"error": "auth failed"}), 403
+    data = request.json or {}
+    cid = data.get("cmd_id", "")
+    if not cid:
+        return jsonify({"error": "missing cmd_id"}), 400
+    with lock:
+        if cid not in progress:
+            progress[cid] = {
+                "cmd": data.get("command", ""),
+                "agent_id": data.get("agent_id", ""),
+                "hostname": agents.get(data.get("agent_id", ""), {}).get("hostname", ""),
+                "steps": [],
+                "done": False,
+                "start_time": time.time(),
+            }
+        step_info = {
+            "step": data.get("step", 0),
+            "total": data.get("total", 0),
+            "msg": data.get("msg", ""),
+            "status": data.get("status", "running"),  # running|ok|error|timeout
+            "time": time.time(),
+            "elapsed": data.get("elapsed", 0),
+        }
+        progress[cid]["steps"].append(step_info)
+        if data.get("status") in ("ok", "error", "timeout", "done"):
+            if data.get("step", 0) >= data.get("total", 0):
+                progress[cid]["done"] = True
+    return jsonify({"ok": True})
+
+@app.route("/api/get_progress")
+def get_progress():
+    """面板轮询命令执行进度"""
+    cid = request.args.get("cmd_id", "")
+    if not cid:
+        return jsonify({"error": "missing cmd_id"}), 400
+    with lock:
+        p = progress.get(cid)
+        if not p:
+            return jsonify({"found": False, "steps": [], "done": False})
+        # 超时检测: 如果 60 秒没有新步骤且未完成, 标记超时
+        if not p["done"] and p["steps"]:
+            last_step_time = p["steps"][-1]["time"]
+            if time.time() - last_step_time > 60:
+                p["steps"].append({
+                    "step": p["steps"][-1]["step"],
+                    "total": p["steps"][-1]["total"],
+                    "msg": f"⏰ 步骤超时 ({int(time.time() - last_step_time)}s 无响应)",
+                    "status": "timeout",
+                    "time": time.time(),
+                    "elapsed": time.time() - p["start_time"],
+                })
+                p["done"] = True
+        return jsonify({
+            "found": True,
+            "cmd": p["cmd"],
+            "hostname": p["hostname"],
+            "steps": p["steps"],
+            "done": p["done"],
+            "elapsed": round(time.time() - p["start_time"], 1),
+        })
+
+def _cleanup_progress():
+    """定时清理过期的 progress 记录 (保留5分钟)"""
+    now = time.time()
+    expired = [k for k, v in progress.items() if now - v["start_time"] > 300]
+    for k in expired:
+        del progress[k]
 
 # ============ API: Web 面板 ============
 
@@ -208,6 +284,13 @@ def send_command():
             "time": time.time(),
         })
         _add_history(aid, f"下发命令: {cmd}", json.dumps(data.get("params", {}), ensure_ascii=False))
+        # 初始化 progress 跟踪
+        progress[cid] = {
+            "cmd": cmd, "agent_id": aid,
+            "hostname": agents.get(aid, {}).get("hostname", aid[:8]),
+            "steps": [], "done": False, "start_time": time.time(),
+        }
+        _cleanup_progress()
     return jsonify({"ok": True, "cmd_id": cid})
 
 @app.route("/api/history")
@@ -575,6 +658,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC
 .mdl-input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(99,102,241,.1)}
 .mdl-select{width:100%;padding:8px 12px;border-radius:8px;border:1px solid var(--border);font-size:13px;margin-top:6px;background:#fff;cursor:pointer;outline:none}
 .mdl-label{font-size:12px;color:var(--text-2);font-weight:500}
+.progress-overlay{display:none;position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:250;align-items:center;justify-content:center}
+.progress-overlay.show{display:flex}
+.progress-box{background:#fff;border-radius:16px;padding:20px;max-width:480px;width:92%;box-shadow:var(--shadow-lg);max-height:70vh;display:flex;flex-direction:column}
+.progress-box h3{font-size:15px;font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.progress-box .pg-meta{font-size:11px;color:var(--sub);margin-bottom:8px}
+.progress-box .pg-bar{height:4px;background:#e2e8f0;border-radius:4px;overflow:hidden;margin-bottom:10px}
+.progress-box .pg-bar .pg-fill{height:100%;background:var(--primary);border-radius:4px;transition:width .3s}
+.progress-box .pg-steps{flex:1;overflow-y:auto;max-height:40vh;font-size:12px;font-family:'SF Mono',Consolas,monospace;line-height:1.8}
+.progress-box .pg-step{padding:2px 0;display:flex;gap:6px;align-items:flex-start}
+.progress-box .pg-step .pg-icon{flex-shrink:0;width:16px;text-align:center}
+.progress-box .pg-step .pg-tag{color:var(--primary);font-weight:600;flex-shrink:0}
+.progress-box .pg-step .pg-msg{color:var(--text-2);word-break:break-all}
+.progress-box .pg-step.st-ok .pg-msg{color:var(--green-text)}
+.progress-box .pg-step.st-error .pg-msg{color:var(--red-text)}
+.progress-box .pg-step.st-timeout .pg-msg{color:var(--orange-text)}
+.progress-box .pg-close{margin-top:12px;text-align:right}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
 @media(max-width:640px){.topbar{padding:14px 16px;flex-direction:column;align-items:flex-start;gap:10px}.container{padding:16px}.drawer{width:100vw;right:-100vw}.search{width:160px}.info-grid{grid-template-columns:1fr}.info-grid .ig-row.half{grid-column:span 2}}
 </style>
@@ -662,9 +761,20 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC
     </div>
   </div>
 </div>
+
+<div class="progress-overlay" id="progressOverlay">
+  <div class="progress-box">
+    <h3 id="pgTitle">⏳ 执行中...</h3>
+    <div class="pg-meta" id="pgMeta"></div>
+    <div class="pg-bar"><div class="pg-fill" id="pgFill" style="width:0%"></div></div>
+    <div class="pg-steps" id="pgSteps"></div>
+    <div class="pg-close"><button class="btn btn-ghost" id="pgCloseBtn" onclick="closeProgress()" style="display:none">关闭</button></div>
+  </div>
+</div>
 <script>
 const API=(location.pathname.startsWith("/gyk")?"/gyk":"");
 let _agents=[],_history=[],_sessionLogs=[],_currentAgentId=null,_logTab="all",_logDeviceFilter=new Set(),pendingAction=null;
+let _pgTimer=null,_pgCmdId=null;
 
 function ago(t){if(!t)return"--";const s=Math.floor(Date.now()/1000-t);if(s<5)return"刚刚";if(s<60)return s+"秒前";if(s<3600)return Math.floor(s/60)+"分钟前";return Math.floor(s/3600)+"小时前";}
 function fmtTime(t){if(!t)return"";const d=new Date(t*1000);return d.toLocaleString("zh-CN",{hour12:false,month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"});}
@@ -675,6 +785,55 @@ function addLog(msg,type=""){
   if(_sessionLogs.length>200)_sessionLogs.pop();
   document.getElementById("sessLogCount").textContent=_sessionLogs.length;
   renderLogs();
+}
+
+function openProgress(cmdId,cmdName,hostname){
+  _pgCmdId=cmdId;
+  document.getElementById('pgTitle').textContent='⏳ '+cmdName;
+  document.getElementById('pgMeta').textContent=(hostname||'')+'  ·  等待客户端响应...';
+  document.getElementById('pgFill').style.width='0%';
+  document.getElementById('pgSteps').innerHTML='<div style="color:var(--sub);padding:8px 0">等待客户端接收指令...</div>';
+  document.getElementById('pgCloseBtn').style.display='none';
+  document.getElementById('progressOverlay').classList.add('show');
+  if(_pgTimer)clearInterval(_pgTimer);
+  _pgTimer=setInterval(()=>pollProgress(cmdId),800);
+}
+function closeProgress(){
+  document.getElementById('progressOverlay').classList.remove('show');
+  if(_pgTimer){clearInterval(_pgTimer);_pgTimer=null;}
+  _pgCmdId=null;
+}
+async function pollProgress(cmdId){
+  try{
+    const r=await fetch(API+'/api/get_progress?cmd_id='+encodeURIComponent(cmdId));
+    const d=await r.json();
+    if(!d.found)return;
+    const steps=d.steps||[];
+    const icons={running:'⏳',ok:'✅',error:'❌',timeout:'⏰'};
+    let total=0,current=0;
+    if(steps.length){total=steps[steps.length-1].total||steps.length;current=steps[steps.length-1].step||steps.length;}
+    const pct=total>0?Math.min(100,Math.round(current/total*100)):0;
+    document.getElementById('pgFill').style.width=pct+'%';
+    document.getElementById('pgMeta').textContent=(d.hostname||'')+'  ·  '+d.cmd+'  ·  '+d.elapsed+'s';
+    document.getElementById('pgSteps').innerHTML=steps.map(s=>{
+      const ic=icons[s.status]||'•';
+      const cls='pg-step st-'+(s.status||'running');
+      const tag=s.total>0?'['+s.step+'/'+s.total+']':'';
+      return '<div class="'+cls+'"><span class="pg-icon">'+ic+'</span><span class="pg-tag">'+esc(tag)+'</span><span class="pg-msg">'+esc(s.msg)+'</span></div>';
+    }).join('');
+    // 自动滚动到底部
+    const box=document.getElementById('pgSteps');box.scrollTop=box.scrollHeight;
+    if(d.done){
+      clearInterval(_pgTimer);_pgTimer=null;
+      document.getElementById('pgCloseBtn').style.display='inline-block';
+      const lastSt=steps.length?steps[steps.length-1].status:'';
+      if(lastSt==='ok')document.getElementById('pgTitle').textContent='✅ 执行完成';
+      else if(lastSt==='error')document.getElementById('pgTitle').textContent='❌ 执行失败';
+      else if(lastSt==='timeout')document.getElementById('pgTitle').textContent='⏰ 执行超时';
+      else document.getElementById('pgTitle').textContent='✅ 执行完成';
+      document.getElementById('pgFill').style.width='100%';
+    }
+  }catch(e){console.error('pollProgress',e);}
 }
 
 function _cardKey(a){
@@ -794,8 +953,19 @@ function renderDrawer(){
 }
 
 async function sendCmd(agentId,cmd,params={}){
-  addLog('下发: '+cmd+' → '+agentId.substring(0,8));
-  try{const r=await fetch(API+"/api/command",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({agent_id:agentId,command:cmd,params})});const j=await r.json();if(j.ok)addLog('命令已发送 ('+j.cmd_id+')','ok');else addLog('发送失败: '+j.error,'err');}catch(e){addLog('网络错误: '+e,'err');}
+  const a=_agents.find(x=>x.agent_id===agentId);
+  const hostname=a?a.hostname:agentId.substring(0,8);
+  addLog('下发: '+cmd+' → '+hostname);
+  try{
+    const r=await fetch(API+"/api/command",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({agent_id:agentId,command:cmd,params})});
+    const j=await r.json();
+    if(j.ok){
+      addLog('命令已发送 ('+j.cmd_id+')','ok');
+      // 自动打开进度面板
+      const cmdNames={logout:'强制下线',cancel_mab:'踢MAC',unlock:'解锁',refresh:'状态刷新',enable_autostart:'启用自启',disable_autostart:'禁用自启',protect:'文件保护',unprotect:'解除保护',start_watchdog:'启动看门狗',set_bandwidth:'网络限速',clear_bandwidth:'解除限速',set_dns:'DNS设置',reset_dns:'DNS重置',self_update:'推送更新',uninstall:'远程卸载'};
+      openProgress(j.cmd_id,cmdNames[cmd]||cmd,hostname);
+    }else{addLog('发送失败: '+j.error,'err');}
+  }catch(e){addLog('网络错误: '+e,'err');}
 }
 function closeModal(){document.getElementById("confirmModal").classList.remove("show");pendingAction=null;}
 function openModal(title,msgHtml){document.getElementById("modalTitle").textContent=title;document.getElementById("modalMsg").innerHTML=msgHtml;document.getElementById("confirmModal").classList.add("show");}

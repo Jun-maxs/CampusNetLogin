@@ -847,45 +847,44 @@ def _cleanup_old_exe():
             except:
                 pass
 
-def self_update(download_url, target_version=""):
+def self_update(download_url, target_version="", on_step=None):
     """静默自更新: 下载→重命名→替换→重启, 全过程无弹窗
     
-    步骤:
-    1. 下载新 exe 到 CampusNetAgent_new.exe
-    2. 重命名当前 exe → CampusNetAgent_old.exe (Windows允许重命名运行中exe)
-    3. 重命名新 exe → CampusNetAgent.exe
-    4. 启动新进程 (DETACHED_PROCESS, 不继承控制台)
-    5. 退出当前进程
+    on_step: 可选回调 on_step(step, msg, status) 用于汇报进度
     """
     import subprocess, shutil
+    _S = on_step or (lambda s, m, st="running": None)
     
-    exe_name = os.path.basename(AGENT_EXE)  # CampusNetAgent.exe
+    exe_name = os.path.basename(AGENT_EXE)
     new_exe = os.path.join(AGENT_DIR, "CampusNetAgent_new.exe")
     old_exe = os.path.join(AGENT_DIR, "CampusNetAgent_old.exe")
     
     # 1. 下载新版本
-    print(f"  [更新] 开始下载: {download_url}")
+    _S(3, f"开始下载: {download_url[:60]}...")
     try:
         req = urllib.request.Request(download_url)
         req.add_header("User-Agent", "CampusNetAgent-Updater")
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = resp.read()
-        if len(data) < 100000:  # 小于100KB肯定不对
+        size_mb = len(data) / (1024 * 1024)
+        if len(data) < 100000:
+            _S(3, f"下载文件过小({len(data)}B), 可能不是有效exe", "error")
             return False, f"下载文件过小({len(data)}B), 可能不是有效exe"
         with open(new_exe, "wb") as f:
             f.write(data)
-        print(f"  [更新] 下载完成: {len(data)/(1024*1024):.1f}MB")
+        _S(3, f"下载完成: {size_mb:.1f}MB", "ok")
     except Exception as e:
+        _S(3, f"下载失败: {e}", "error")
         return False, f"下载失败: {e}"
     
-    # 2. 清理旧的old文件 (可能被占用, 多种方式尝试)
+    # 2. 清理旧的old文件
+    _S(4, "清理旧版本备份文件...")
     if os.path.exists(old_exe):
         for attempt in range(3):
             try:
                 os.remove(old_exe)
                 break
             except PermissionError:
-                # 文件被占用, 尝试重命名走开
                 try:
                     trash = os.path.join(AGENT_DIR, f"_trash_{int(time.time())}.exe")
                     os.rename(old_exe, trash)
@@ -894,36 +893,38 @@ def self_update(download_url, target_version=""):
                     time.sleep(0.5)
             except:
                 break
+    _S(4, "旧文件清理完成", "ok")
     
-    # 3. 重命名当前 exe → old (Windows允许重命名正在运行的exe)
+    # 3. 重命名当前 exe → old
     if getattr(sys, 'frozen', False):
+        _S(5, f"重命名当前 exe → {os.path.basename(old_exe)}...")
         try:
             os.rename(AGENT_EXE, old_exe)
-            print(f"  [更新] 当前exe已重命名为 {os.path.basename(old_exe)}")
         except OSError:
-            # old_exe 仍然存在, 用带时间戳的备份名
             old_exe = os.path.join(AGENT_DIR, f"CampusNetAgent_old_{int(time.time())}.exe")
             try:
                 os.rename(AGENT_EXE, old_exe)
-                print(f"  [更新] 当前exe已重命名为 {os.path.basename(old_exe)}")
             except Exception as e:
+                _S(5, f"重命名失败: {e}", "error")
                 return False, f"重命名当前exe失败: {e}"
+        _S(5, f"当前exe已重命名为 {os.path.basename(old_exe)}", "ok")
         
         # 4. 重命名新 exe → 原名
+        _S(6, f"新版本就位: {exe_name}...")
         try:
             os.rename(new_exe, AGENT_EXE)
-            print(f"  [更新] 新版本已就位: {exe_name}")
+            _S(6, f"新版本已就位: {exe_name}", "ok")
         except Exception as e:
-            # 回滚: 把旧的改回来
             try:
                 os.rename(old_exe, AGENT_EXE)
             except:
                 pass
+            _S(6, f"替换失败(已回滚): {e}", "error")
             return False, f"替换exe失败: {e}"
         
-        # 5. 启动新进程 (完全独立, 不继承父进程)
+        # 5. 启动新进程
+        _S(7, "启动新版本进程...")
         try:
-            # 传递当前的命令行参数
             cmd_args = [AGENT_EXE] + sys.argv[1:]
             subprocess.Popen(
                 cmd_args,
@@ -931,15 +932,16 @@ def self_update(download_url, target_version=""):
                 close_fds=True,
                 cwd=AGENT_DIR
             )
-            print(f"  [更新] 新版本已启动, 即将退出当前进程")
+            _S(7, "新版本进程已启动", "ok")
         except Exception as e:
+            _S(7, f"启动失败: {e}", "error")
             return False, f"启动新版本失败: {e}"
         
         msg = f"更新成功: v{AGENT_VERSION}→v{target_version or '?'}"
         return True, msg
     else:
-        # 开发环境: 只下载, 不替换
         os.rename(new_exe, os.path.join(AGENT_DIR, f"CampusNetAgent_v{target_version}.exe"))
+        _S(5, "开发模式: 新版本已下载, 不自动替换", "ok")
         return True, f"开发模式: 新版本已下载, 不自动替换"
 
 def _start_watchdog():
@@ -1386,42 +1388,68 @@ class Agent:
         for cmd in result.get("commands", []):
             self.execute(cmd)
 
+    def _report_step(self, cmd_id, command, step, total, msg, status="running"):
+        """向服务器汇报命令执行进度"""
+        elapsed = time.time() - getattr(self, '_cmd_start', time.time())
+        tag = f"[{step}/{total}]"
+        icon = {"running": "⏳", "ok": "✅", "error": "❌", "timeout": "⏰"}.get(status, "•")
+        print(f"  {icon} {tag} {msg}")
+        try:
+            http_post(f"{self.server_url}/api/report_progress", {
+                "agent_id": self.agent_id, "cmd_id": cmd_id,
+                "command": command, "step": step, "total": total,
+                "msg": msg, "status": status, "elapsed": round(elapsed, 1),
+            })
+        except:
+            pass
+
     def execute(self, cmd):
         """执行远程命令"""
         command = cmd.get("command", "")
         params = cmd.get("params", {})
         cmd_id = cmd.get("id", "")
+        self._cmd_start = time.time()
         print(f"  [CMD] 执行: {command} (id={cmd_id})")
         
         success = False
         message = ""
         
+        # 快捷步骤汇报
+        S = lambda step, total, msg, st="running": self._report_step(cmd_id, command, step, total, msg, st)
+        
         try:
             if command == "logout":
+                S(1, 4, "接收强制下线指令")
+                S(2, 4, "执行 full_logout...")
                 r = self.net.full_logout()
                 success = r.get("result") == "success"
                 message = r.get("message", "已下线" if success else "下线失败")
-                # 启用强制离线锁, 防止无感认证自动重连
+                S(3, 4, f"登出结果: {message}", "ok" if success else "error")
                 self.force_offline = True
                 self.reconnect_at = 0
-                duration = int(params.get("duration", 0))  # 0=永久
+                duration = int(params.get("duration", 0))
                 if duration > 0:
                     self.force_offline_until = time.time() + duration
                     message += f" | 强制离线 {duration}秒"
                 else:
                     self.force_offline_until = 0
                     message += " | 强制离线(永久,发送unlock解锁)"
+                S(4, 4, f"离线锁已设置: {message}", "ok")
 
             elif command == "cancel_mab":
-                # 清缓存, 强制从 portal 实时获取当前登录用户
+                S(1, 5, "清除缓存, 准备获取 user_index")
                 self.net.user_index = ""
                 self.net.username = ""
                 self.net._cookie_opener = None
+                S(2, 5, "强制从 portal 获取当前用户...")
                 self.net._refresh_user_index(force=True)
                 if not self.net.user_index:
                     success = False
                     message = "无法获取 user_index (设备已离线或不在校园网内)"
+                    S(3, 5, message, "error")
                 else:
+                    S(3, 5, f"user_index: {self.net.user_index[:20]}...", "ok")
+                    S(4, 5, "执行 cancel_mab + cancel_mac_by_name...")
                     r1 = self.net.cancel_mab()
                     r2 = self.net.cancel_mac_by_name()
                     success = r1.get("result")=="success" or r2.get("result")=="success"
@@ -1432,78 +1460,111 @@ class Agent:
                         if r2.get("message"): details.append(f"[Mac]{r2['message'][:60]}")
                         if details:
                             message += " | " + " ".join(details)
+                    S(5, 5, message, "ok" if success else "error")
 
             elif command == "unlock":
+                S(1, 2, "解除强制离线锁")
                 self.force_offline = False
                 self.force_offline_until = 0
                 success = True
                 message = "强制离线锁已解除"
+                S(2, 2, message, "ok")
 
-            elif command == "login_now":
-                success = False
-                message = "远程上线登录功能已禁用"
-                
-            elif command == "login":
+            elif command in ("login_now", "login"):
+                S(1, 1, "远程上线登录功能已禁用", "error")
                 success = False
                 message = "远程上线登录功能已禁用"
                         
             elif command == "refresh":
+                S(1, 3, "检测网络状态...")
                 online, ip, ui, msg = self.net.check_online()
+                S(2, 3, f"检测完成: {'在线' if online else '离线'} - {ip}")
                 success = True
                 message = f"{'在线' if online else '离线'} - {ip} - {msg}"
+                S(3, 3, message, "ok")
                 
             elif command == "set_credentials":
+                S(1, 1, "远程设置凭据功能已禁用", "error")
                 success = False
                 message = "远程设置凭据功能已禁用"
 
             elif command == "enable_autostart":
+                S(1, 2, "设置开机自启动...")
                 success, message = enable_autostart()
+                S(2, 2, message, "ok" if success else "error")
 
             elif command == "disable_autostart":
+                S(1, 2, "禁用开机自启动...")
                 success, message = disable_autostart()
+                S(2, 2, message, "ok" if success else "error")
 
             elif command == "protect":
+                S(1, 3, "设置文件保护属性...")
                 r1 = protect_files()
+                S(2, 3, f"文件保护: {r1[1]}", "ok" if r1[0] else "error")
+                S(3, 3, "添加 Defender 排除...")
                 r2 = add_defender_exclusion()
                 success = r1[0] or r2[0]
                 message = f"文件保护: {r1[1]} | Defender: {r2[1]}"
+                S(3, 3, f"Defender: {r2[1]}", "ok" if r2[0] else "error")
 
             elif command == "unprotect":
+                S(1, 3, "移除文件保护...")
                 r1 = unprotect_files()
+                S(2, 3, f"{r1[1]}", "ok")
                 r2 = remove_defender_exclusion()
                 success = True
                 message = f"{r1[1]} | {r2[1]}"
+                S(3, 3, f"{r2[1]}", "ok")
 
             elif command == "start_watchdog":
+                S(1, 2, "启动看门狗进程...")
                 _start_watchdog()
                 success = True
                 message = "看门狗已启动(30秒检测一次)"
+                S(2, 2, message, "ok")
 
             elif command == "set_bandwidth":
                 rate = int(params.get("rate_kbps", 100))
+                S(1, 5, f"接收限速指令: {rate} KB/s")
+                S(2, 5, "启用 QoS Packet Scheduler + 创建 QoS 策略...")
+                S(3, 5, f"设置 TCP 接收窗口限制...")
+                S(4, 5, "写入 GPO 注册表 + gpupdate...")
                 success, message = set_bandwidth_limit(rate)
+                S(5, 5, message, "ok" if success else "error")
 
             elif command == "clear_bandwidth":
+                S(1, 3, "接收解除限速指令")
+                S(2, 3, "移除 QoS 策略 + 恢复 TCP 窗口 + 清理注册表...")
                 success, message = clear_bandwidth_limit()
+                S(3, 3, message, "ok" if success else "error")
 
             elif command == "set_dns":
                 dns1 = params.get("primary", "127.0.0.1")
                 dns2 = params.get("secondary", "")
+                S(1, 3, f"接收 DNS 设置: {dns1}" + (f" / {dns2}" if dns2 else ""))
+                S(2, 3, "修改所有活动网卡 DNS...")
                 success, message = set_dns_hijack(dns1, dns2)
+                S(3, 3, message, "ok" if success else "error")
 
             elif command == "reset_dns":
+                S(1, 3, "接收 DNS 重置指令")
+                S(2, 3, "恢复所有网卡为 DHCP 自动获取...")
                 success, message = reset_dns()
+                S(3, 3, message, "ok" if success else "error")
 
             elif command == "self_update":
                 url = params.get("url", "")
                 ver = params.get("version", "")
                 if not url:
+                    S(1, 1, "缺少下载URL", "error")
                     message = "缺少下载URL"
                 else:
-                    success, message = self_update(url, ver)
+                    S(1, 8, f"接收更新指令: v{ver}")
+                    S(2, 8, f"开始下载: {url[:60]}...")
+                    success, message = self_update(url, ver, lambda step, msg, st="running": S(step, 8, msg, st))
                     if success and getattr(sys, 'frozen', False):
-                        # 回报结果后退出, 新进程已启动
-                        print(f"  [RES] {command}: ✓ {message}")
+                        S(8, 8, f"更新完成, 新进程已启动, 旧进程即将退出", "ok")
                         http_post(f"{self.server_url}/api/report", {
                             "agent_id": self.agent_id, "cmd_id": cmd_id,
                             "success": True, "message": message,
@@ -1512,10 +1573,11 @@ class Agent:
                         os._exit(0)
 
             elif command == "uninstall":
-                # 完全卸载 (仅服务器可触发)
+                S(1, 4, "接收卸载指令")
+                S(2, 4, "执行完全卸载: 停止进程 + 删除文件 + 清理注册表...")
                 success, message = full_uninstall()
-                # 回报结果后退出进程
-                print(f"  [RES] {command}: {'✓' if success else '✗'} {message}")
+                S(3, 4, message, "ok" if success else "error")
+                S(4, 4, "Agent 即将退出...", "ok")
                 http_post(f"{self.server_url}/api/report", {
                     "agent_id": self.agent_id, "cmd_id": cmd_id,
                     "success": success, "message": message,
@@ -1524,13 +1586,15 @@ class Agent:
                 os._exit(0)
                 
             else:
+                S(1, 1, f"未知命令: {command}", "error")
                 message = f"未知命令: {command}"
                 
         except Exception as e:
             message = f"执行异常: {e}"
             traceback.print_exc()
+            S(0, 0, f"❌ 异常: {e}", "error")
         
-        # 回报结果
+        # 回报最终结果
         print(f"  [RES] {command}: {'✓' if success else '✗'} {message}")
         http_post(f"{self.server_url}/api/report", {
             "agent_id": self.agent_id,
