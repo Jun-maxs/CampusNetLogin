@@ -117,6 +117,8 @@ def _run_as_admin(cmd_args):
         import ctypes
         bat_path = os.path.join(AGENT_DIR, "_admin_cmd.bat")
         result_path = os.path.join(AGENT_DIR, "_admin_result.txt")
+        _unprotect_file(bat_path)
+        _unprotect_file(result_path)
         # 删除旧的结果文件
         if os.path.exists(result_path):
             os.remove(result_path)
@@ -186,9 +188,20 @@ def is_autostart_enabled():
         return False
     return _reg_exists() or _task_exists() or _startup_lnk_exists()
 
+def _unprotect_file(path):
+    """写入前解除单个文件的只读/隐藏/系统属性"""
+    if os.path.exists(path) and platform.system() == "Windows":
+        try:
+            import subprocess
+            subprocess.run(["attrib", "-R", "-H", "-S", path],
+                          capture_output=True, timeout=5,
+                          creationflags=subprocess.CREATE_NO_WINDOW)
+        except: pass
+
 def _create_vbs():
     """创建 VBS 静默启动脚本"""
     vbs_path = os.path.join(AGENT_DIR, "start_agent.vbs")
+    _unprotect_file(vbs_path)
     if getattr(sys, 'frozen', False):
         # 打包后: 直接启动 exe
         with open(vbs_path, "w", encoding="utf-8") as f:
@@ -441,6 +454,7 @@ def _start_watchdog():
         return
     import subprocess
     watchdog_vbs = os.path.join(AGENT_DIR, "_watchdog.vbs")
+    _unprotect_file(watchdog_vbs)
     pid = os.getpid()
     if getattr(sys, 'frozen', False):
         # 打包后: 监控 exe 进程名
@@ -495,6 +509,7 @@ def load_config():
 
 def save_config(cfg):
     try:
+        _unprotect_file(CONFIG_FILE)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     except Exception as e:
