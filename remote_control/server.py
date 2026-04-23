@@ -188,7 +188,7 @@ def get_agents():
                 item["status_text"] = "在线" if d.get("net_online") else "已连接(未认证)"
                 item["status_cls"] = "on" if d.get("net_online") else "aw"
             result.append(item)
-    result.sort(key=lambda x: (0 if x.get("alive") else 1, -x.get("last_seen", 0)))
+    result.sort(key=lambda x: (0 if x.get("alive") else 1, x.get("hostname", x.get("agent_id", ""))))
     return jsonify(result)
 
 @app.route("/api/command", methods=["POST"])
@@ -595,29 +595,63 @@ function addLog(msg,type=""){
   renderLogs();
 }
 
+function _cardKey(a){
+  return [a.agent_id,a.status_cls,a.net_online,a.force_offline,a.bandwidth_limit,a.dns_hijacked,a.autostart,a.username,a.user_id,a.version,a.user_ip||a.local_ip,a.campus_ip,a.hostname].join("|");
+}
+function _buildCard(a){
+  const cls=a.status_cls||"off";
+  const flags=[];
+  if(a.net_online&&!a.force_offline)flags.push('<span class="flag flag-ok">已认证</span>');
+  else if(a.force_offline)flags.push('<span class="flag flag-danger">强制离线</span>');
+  else flags.push('<span class="flag flag-muted">未认证</span>');
+  if(a.bandwidth_limit)flags.push('<span class="flag flag-warn">⚡'+a.bandwidth_limit+'KB/s</span>');
+  if(a.dns_hijacked)flags.push('<span class="flag flag-danger">🌐DNS劫持</span>');
+  if(a.autostart)flags.push('<span class="flag flag-info">🚀自启</span>');
+  return `<div class="device-card ${cls}" data-aid="${esc(a.agent_id)}" onclick="openDrawer('${esc(a.agent_id)}')">
+    <div class="card-top"><div class="card-title"><span class="dot"></span><span class="name">${esc(a.hostname||a.agent_id)}</span></div><span class="badge ${cls}">${esc(a.status_text||"未知")}</span></div>
+    <div class="card-user">${a.username?'👤 '+esc(a.username):''}${a.user_id?' · '+esc(a.user_id):''}${!a.username&&!a.user_id?'<span style="color:var(--sub)">未获取用户信息</span>':''}</div>
+    <div class="card-meta"><span>🌐 ${esc(a.user_ip||a.local_ip||"--")}</span><span>📦 v${esc(a.version||"?")}</span></div>
+    <div class="card-flags">${flags.join("")}</div>
+    <div class="card-foot"><span>心跳 <span class="js-hb">${ago(a.last_seen)}</span></span><span>运行 <span class="js-up">${esc(a.uptime||"--")}</span></span></div>
+  </div>`;
+}
+let _cardCache={};
 function renderAgents(){
   const grid=document.getElementById("agentGrid");
   const kw=(document.getElementById("deviceSearch")?.value||"").trim().toLowerCase();
   let list=_agents;
   if(kw)list=_agents.filter(a=>[a.hostname,a.username,a.user_id,a.local_ip,a.user_ip,a.campus_ip,a.agent_id].map(x=>(x||"").toString().toLowerCase()).join("|").includes(kw));
-  if(!list.length){grid.innerHTML='<div class="card-empty">暂无 Agent 连接</div>';return;}
-  grid.innerHTML=list.map(a=>{
-    const cls=a.status_cls||"off";
-    const flags=[];
-    if(a.net_online&&!a.force_offline)flags.push('<span class="flag flag-ok">已认证</span>');
-    else if(a.force_offline)flags.push('<span class="flag flag-danger">强制离线</span>');
-    else flags.push('<span class="flag flag-muted">未认证</span>');
-    if(a.bandwidth_limit)flags.push('<span class="flag flag-warn">⚡'+a.bandwidth_limit+'KB/s</span>');
-    if(a.dns_hijacked)flags.push('<span class="flag flag-danger">🌐DNS劫持</span>');
-    if(a.autostart)flags.push('<span class="flag flag-info">🚀自启</span>');
-    return `<div class="device-card ${cls}" onclick="openDrawer('${esc(a.agent_id)}')">
-      <div class="card-top"><div class="card-title"><span class="dot"></span><span class="name">${esc(a.hostname||a.agent_id)}</span></div><span class="badge ${cls}">${esc(a.status_text||"未知")}</span></div>
-      <div class="card-user">${a.username?'👤 '+esc(a.username):''}${a.user_id?' · '+esc(a.user_id):''}${!a.username&&!a.user_id?'<span style="color:var(--sub)">未获取用户信息</span>':''}</div>
-      <div class="card-meta"><span>🌐 ${esc(a.user_ip||a.local_ip||"--")}</span><span>📦 v${esc(a.version||"?")}</span></div>
-      <div class="card-flags">${flags.join("")}</div>
-      <div class="card-foot"><span>心跳 ${ago(a.last_seen)}</span><span>运行 ${esc(a.uptime||"--")}</span></div>
-    </div>`;
-  }).join("");
+  if(!list.length){grid.innerHTML='<div class="card-empty">暂无 Agent 连接</div>';_cardCache={};return;}
+  // 构建目标 ID 顺序
+  const targetIds=list.map(a=>a.agent_id);
+  const existingCards={};
+  grid.querySelectorAll('[data-aid]').forEach(el=>{existingCards[el.dataset.aid]=el;});
+  const existingIds=[...grid.querySelectorAll('[data-aid]')].map(el=>el.dataset.aid);
+  // 如果ID列表和顺序都没变, 只做原地更新
+  const orderSame=targetIds.length===existingIds.length&&targetIds.every((id,i)=>id===existingIds[i]);
+  if(orderSame){
+    // 原地更新每张卡片内容 (不移动DOM, 不闪烁)
+    list.forEach(a=>{
+      const el=existingCards[a.agent_id];if(!el)return;
+      const key=_cardKey(a);
+      if(_cardCache[a.agent_id]!==key){
+        // 状态变化了, 替换卡片内容
+        const tmp=document.createElement('div');tmp.innerHTML=_buildCard(a);
+        const newCard=tmp.firstElementChild;
+        el.className=newCard.className;
+        el.innerHTML=newCard.innerHTML;
+        _cardCache[a.agent_id]=key;
+      } else {
+        // 只更新动态文本 (心跳/运行时间)
+        const hb=el.querySelector('.js-hb');if(hb)hb.textContent=ago(a.last_seen);
+        const up=el.querySelector('.js-up');if(up)up.textContent=a.uptime||'--';
+      }
+    });
+  } else {
+    // ID列表变了 (设备上线/下线/搜索变化), 全量重建
+    _cardCache={};
+    grid.innerHTML=list.map(a=>{_cardCache[a.agent_id]=_cardKey(a);return _buildCard(a);}).join("");
+  }
 }
 
 function openDrawer(aid){_currentAgentId=aid;renderDrawer();document.getElementById("drawerBackdrop").classList.add("show");document.getElementById("agentDrawer").classList.add("show");}
