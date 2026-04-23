@@ -829,6 +829,7 @@ def get_dns_status():
 
 def _cleanup_old_exe():
     """启动时清理上次更新留下的旧版本文件"""
+    import glob
     for suffix in ("_old.exe", "_new.exe", ".old.exe", ".update.exe"):
         old = os.path.join(AGENT_DIR, f"CampusNetAgent{suffix}")
         try:
@@ -837,6 +838,14 @@ def _cleanup_old_exe():
                 print(f"  [更新] 已清理旧文件: {os.path.basename(old)}")
         except:
             pass
+    # 清理带时间戳的备份和trash文件
+    for pattern in ("CampusNetAgent_old_*.exe", "_trash_*.exe"):
+        for f in glob.glob(os.path.join(AGENT_DIR, pattern)):
+            try:
+                os.remove(f)
+                print(f"  [更新] 已清理: {os.path.basename(f)}")
+            except:
+                pass
 
 def self_update(download_url, target_version=""):
     """静默自更新: 下载→重命名→替换→重启, 全过程无弹窗
@@ -869,20 +878,36 @@ def self_update(download_url, target_version=""):
     except Exception as e:
         return False, f"下载失败: {e}"
     
-    # 2. 清理旧的old文件
-    try:
-        if os.path.exists(old_exe):
-            os.remove(old_exe)
-    except:
-        pass
+    # 2. 清理旧的old文件 (可能被占用, 多种方式尝试)
+    if os.path.exists(old_exe):
+        for attempt in range(3):
+            try:
+                os.remove(old_exe)
+                break
+            except PermissionError:
+                # 文件被占用, 尝试重命名走开
+                try:
+                    trash = os.path.join(AGENT_DIR, f"_trash_{int(time.time())}.exe")
+                    os.rename(old_exe, trash)
+                    break
+                except:
+                    time.sleep(0.5)
+            except:
+                break
     
     # 3. 重命名当前 exe → old (Windows允许重命名正在运行的exe)
     if getattr(sys, 'frozen', False):
         try:
             os.rename(AGENT_EXE, old_exe)
             print(f"  [更新] 当前exe已重命名为 {os.path.basename(old_exe)}")
-        except Exception as e:
-            return False, f"重命名当前exe失败: {e}"
+        except OSError:
+            # old_exe 仍然存在, 用带时间戳的备份名
+            old_exe = os.path.join(AGENT_DIR, f"CampusNetAgent_old_{int(time.time())}.exe")
+            try:
+                os.rename(AGENT_EXE, old_exe)
+                print(f"  [更新] 当前exe已重命名为 {os.path.basename(old_exe)}")
+            except Exception as e:
+                return False, f"重命名当前exe失败: {e}"
         
         # 4. 重命名新 exe → 原名
         try:
