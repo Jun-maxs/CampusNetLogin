@@ -12,7 +12,7 @@ import urllib.request, urllib.parse, urllib.error
 _S = b'aHR0cHM6Ly95dWFuYWkuYmVzdC9neWs='  # https://yuanai.best/gyk
 DEFAULT_SERVER = base64.b64decode(_S).decode()
 PORTAL_IP = "10.228.9.7"
-AGENT_VERSION = "1.57"  # 版本号, 每次更新递增
+AGENT_VERSION = "1.63"  # 版本号, 每次更新递增
 # API 鉴权密钥 (服务器和客户端必须一致)
 API_SECRET = "CampusNet@2026#Secure"
 HEARTBEAT_INTERVAL = 5  # 心跳间隔(秒)
@@ -87,6 +87,8 @@ def http_get(url, timeout=8):
 
 # ============ 开机自启管理 (Windows) ============
 TASK_NAME = "CampusNetAgent"
+TASK_USER_NAME = f"{TASK_NAME}-User"
+TASK_NAMES = (TASK_NAME, TASK_USER_NAME)
 
 def _is_admin():
     """检查是否有管理员权限"""
@@ -158,15 +160,19 @@ def _run_as_admin(cmd_args):
         print(f"  [ADMIN] 异常: {e}")
         return False, str(e)
 
-def _task_exists():
+def _task_exists(name=None):
     """检查计划任务是否存在"""
     import subprocess
+    names = (name,) if name else TASK_NAMES
     try:
-        r = subprocess.run(
-            ["schtasks", "/Query", "/TN", TASK_NAME],
-            capture_output=True, text=True, timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW)
-        return r.returncode == 0
+        for task_name in names:
+            r = subprocess.run(
+                ["schtasks", "/Query", "/TN", task_name],
+                capture_output=True, text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+            if r.returncode == 0:
+                return True
+        return False
     except:
         return False
 
@@ -214,6 +220,95 @@ def _autostart_log(msg):
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
     except: pass
 
+def _same_path(a, b):
+    try:
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+    except:
+        return False
+
+def _path_root_exists(path):
+    drive, _ = os.path.splitdrive(os.path.abspath(path))
+    root = (drive + os.sep) if drive else os.path.abspath(os.sep)
+    return os.path.isdir(root)
+
+def _get_stable_agent_dir():
+    """返回稳定安装目录。优先使用当前用户 LocalAppData, 不依赖 D: 盘。"""
+    if platform.system() != "Windows":
+        return AGENT_DIR
+    import tempfile
+    bases = []
+    for key in ("LOCALAPPDATA", "APPDATA", "USERPROFILE"):
+        val = os.environ.get(key)
+        if val:
+            bases.append(os.path.join(val, "AppData", "Local") if key == "USERPROFILE" else val)
+    bases.append(tempfile.gettempdir())
+    for base in bases:
+        try:
+            if base and _path_root_exists(base):
+                return os.path.join(base, "CampusNetAgent")
+        except:
+            pass
+    return os.path.join(tempfile.gettempdir(), "CampusNetAgent")
+
+def _get_stable_agent_exe():
+    return os.path.join(_get_stable_agent_dir(), "CampusNetAgent.exe")
+
+def _copy_config_to_stable(stable_dir):
+    stable_cfg = os.path.join(stable_dir, "agent_config.json")
+    if _same_path(CONFIG_FILE, stable_cfg) or os.path.exists(stable_cfg):
+        return
+    try:
+        if os.path.exists(CONFIG_FILE):
+            import shutil
+            shutil.copy2(CONFIG_FILE, stable_cfg)
+    except:
+        pass
+
+def _prepare_stable_agent_copy():
+    """把正式客户端放到稳定目录, 供自启/任务/看门狗/更新统一引用。"""
+    if platform.system() != "Windows" or not getattr(sys, 'frozen', False):
+        return AGENT_EXE
+    stable_exe = _get_stable_agent_exe()
+    stable_dir = os.path.dirname(stable_exe)
+    if _same_path(AGENT_EXE, stable_exe):
+        return AGENT_EXE
+    try:
+        os.makedirs(stable_dir, exist_ok=True)
+    except:
+        return stable_exe if os.path.exists(stable_exe) else AGENT_EXE
+    if os.path.exists(AGENT_EXE):
+        try:
+            import shutil
+            _unprotect_file(stable_exe)
+            tmp_exe = stable_exe + ".new"
+            shutil.copy2(AGENT_EXE, tmp_exe)
+            os.replace(tmp_exe, stable_exe)
+            _copy_config_to_stable(stable_dir)
+        except Exception as e:
+            _autostart_log(f"稳定安装副本更新失败: {e}")
+    return stable_exe if os.path.exists(stable_exe) else AGENT_EXE
+
+def _ensure_stable_runtime():
+    """非稳定路径启动时, 切到稳定目录中的正式客户端后退出当前进程。"""
+    if platform.system() != "Windows" or not getattr(sys, 'frozen', False):
+        return False
+    stable_exe = _prepare_stable_agent_copy()
+    if _same_path(AGENT_EXE, stable_exe) or not os.path.exists(stable_exe):
+        return False
+    try:
+        import subprocess
+        subprocess.Popen(
+            [stable_exe] + sys.argv[1:],
+            cwd=os.path.dirname(stable_exe),
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+            close_fds=True
+        )
+        _autostart_log(f"已切换到稳定安装路径: {stable_exe}")
+        return True
+    except Exception as e:
+        _autostart_log(f"切换稳定安装路径失败: {e}")
+        return False
+
 def _get_launch_command():
     """获取启动 Agent 的命令行 (用于所有自启层)
     
@@ -222,7 +317,8 @@ def _get_launch_command():
     """
     if getattr(sys, 'frozen', False):
         # 打包后: 直接启动 exe, 不需要 VBS 中间层
-        return AGENT_EXE, f'"{AGENT_EXE}"'
+        target_exe = _prepare_stable_agent_copy()
+        return target_exe, f'"{target_exe}"'
     else:
         # 开发环境: 需要 VBS 隐藏 python 控制台
         vbs_path = os.path.join(AGENT_DIR, "start_agent.vbs")
@@ -257,13 +353,13 @@ def enable_autostart():
     _autostart_log("=" * 50)
     _autostart_log(f"开始注册自启, AGENT_EXE={AGENT_EXE}")
     
-    # 验证 exe 存在
-    if not os.path.exists(AGENT_EXE):
-        msg = f"❌ 启动目标不存在: {AGENT_EXE}"
+    target_path, launch_cmd = _get_launch_command()
+    # 验证自启目标存在。当前进程可能来自临时/回收路径, 自启只绑定稳定目标。
+    if not os.path.exists(target_path):
+        msg = f"❌ 启动目标不存在: {target_path}"
         _autostart_log(msg)
         return False, msg
-    
-    target_path, launch_cmd = _get_launch_command()
+
     _autostart_log(f"启动命令: {launch_cmd}")
 
     # 层级1: 注册表 HKCU\Run (不需管理员, 当前用户登录时启动)
@@ -294,8 +390,17 @@ def enable_autostart():
         results.append(f"注册表✗({e})")
         _autostart_log(f"✗ 注册表异常: {e}")
 
-    # 层级2: 计划任务 schtasks ONLOGON (需管理员, 最可靠)
-    cmd = [
+    # 层级2: 当前用户计划任务 (不需管理员, 失败后再尝试 HIGHEST)
+    import subprocess
+    user_cmd = [
+        "schtasks", "/Create", "/F",
+        "/TN", TASK_USER_NAME,
+        "/TR", launch_cmd,
+        "/SC", "ONLOGON",
+        "/RL", "LIMITED",
+        "/DELAY", "0000:10",
+    ]
+    admin_cmd = [
         "schtasks", "/Create", "/F",
         "/TN", TASK_NAME,
         "/TR", launch_cmd,
@@ -304,14 +409,22 @@ def enable_autostart():
         "/DELAY", "0000:10",
     ]
     try:
-        ok, out = _run_as_admin(cmd)
+        r = subprocess.run(user_cmd, capture_output=True, text=True, timeout=15,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
         time.sleep(0.3)
-        if _task_exists():
-            results.append("计划任务✓")
-            _autostart_log("✓ 计划任务创建+回读成功")
+        if r.returncode == 0 and _task_exists(TASK_USER_NAME):
+            results.append("计划任务✓(用户)")
+            _autostart_log("✓ 用户计划任务创建+回读成功")
         else:
-            results.append(f"计划任务✗")
-            _autostart_log(f"✗ 计划任务失败: ok={ok}, out={out[:150]}")
+            ok, out = _run_as_admin(admin_cmd)
+            time.sleep(0.3)
+            if _task_exists(TASK_NAME):
+                results.append("计划任务✓(最高)")
+                _autostart_log("✓ 最高权限计划任务创建+回读成功")
+            else:
+                results.append(f"计划任务✗")
+                detail = (r.stderr or r.stdout or out or "")[:180]
+                _autostart_log(f"✗ 计划任务失败: user_rc={r.returncode}, admin_ok={ok}, out={detail}")
     except Exception as e:
         results.append(f"计划任务✗({e})")
         _autostart_log(f"✗ 计划任务异常: {e}")
@@ -329,13 +442,13 @@ def enable_autostart():
                 f.write(f'Set ws = CreateObject("WScript.Shell")\n')
                 f.write(f'Set lnk = ws.CreateShortcut("{lnk_path}")\n')
                 if getattr(sys, 'frozen', False):
-                    f.write(f'lnk.TargetPath = "{AGENT_EXE}"\n')
+                    f.write(f'lnk.TargetPath = "{target_path}"\n')
                     f.write(f'lnk.Arguments = ""\n')
                 else:
                     f.write(f'lnk.TargetPath = "wscript.exe"\n')
                     f.write(f'lnk.Arguments = """{target_path}"""\n')
                 f.write(f'lnk.WindowStyle = 7\n')
-                f.write(f'lnk.WorkingDirectory = "{AGENT_DIR}"\n')
+                f.write(f'lnk.WorkingDirectory = "{os.path.dirname(target_path)}"\n')
                 f.write(f'lnk.Save\n')
             import subprocess
             subprocess.run(["wscript.exe", lnk_vbs], timeout=10,
@@ -386,12 +499,19 @@ def disable_autostart():
         results.append(f"注册表✗({e})")
 
     # 删计划任务
-    cmd = ["schtasks", "/Delete", "/TN", TASK_NAME, "/F"]
-    ok, out = _run_as_admin(cmd)
-    if ok:
+    task_ok = False
+    task_errors = []
+    for task_name in TASK_NAMES:
+        cmd = ["schtasks", "/Delete", "/TN", task_name, "/F"]
+        ok, out = _run_as_admin(cmd)
+        if ok or not _task_exists(task_name):
+            task_ok = True
+        else:
+            task_errors.append(f"{task_name}:{out[:50]}")
+    if task_ok:
         results.append("计划任务✓")
     else:
-        results.append(f"计划任务✗({out[:50]})")
+        results.append(f"计划任务✗({' | '.join(task_errors)})")
 
     # 清启动文件夹快捷方式
     startup_dir = _get_startup_folder()
@@ -405,11 +525,13 @@ def disable_autostart():
                 results.append(f"启动文件夹✗({e})")
 
     # 清理 VBS
-    for vf in ["start_agent.vbs", "_watchdog.vbs", "_mk_lnk.vbs"]:
-        vp = os.path.join(AGENT_DIR, vf)
-        if os.path.exists(vp):
-            try: os.remove(vp)
-            except: pass
+    cleanup_dirs = {AGENT_DIR, _get_stable_agent_dir()}
+    for base_dir in cleanup_dirs:
+        for vf in ["start_agent.vbs", "_watchdog.vbs", "_watchdog.pid", "_mk_lnk.vbs"]:
+            vp = os.path.join(base_dir, vf)
+            if os.path.exists(vp):
+                try: os.remove(vp)
+                except: pass
 
     success = any("✓" in r for r in results)
     return success, "已禁用: " + " | ".join(results)
@@ -433,12 +555,11 @@ def full_uninstall():
     if os.path.exists(CONFIG_FILE):
         try: os.remove(CONFIG_FILE)
         except: pass
-    # 4. 杀看门狗
-    import subprocess
+    # 4. 杀本程序看门狗
     try:
-        subprocess.run(["taskkill", "/F", "/IM", "wscript.exe"],
-                      capture_output=True, timeout=5,
-                      creationflags=subprocess.CREATE_NO_WINDOW)
+        stopped = _stop_own_watchdogs()
+        if stopped:
+            results.append(f"看门狗已停止({stopped})")
     except: pass
     return True, "已完全卸载: " + " | ".join(results)
 
@@ -559,7 +680,7 @@ def _ps_admin(cmd_str, timeout=15):
     return ok, out
 
 # 限速标记文件, 用于记录当前限速状态
-_BW_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_bw_limit_state.json")
+_BW_STATE_FILE = os.path.join(AGENT_DIR, "_bw_limit_state.json")
 
 def set_bandwidth_limit(rate_kbps):
     """设置带宽限制 (静默, 无弹窗)
@@ -633,13 +754,16 @@ def set_bandwidth_limit(rate_kbps):
     else:
         results.append("QoS验证✗")
     
+    detail = " | ".join(results)
+    if 'QoS验证✓' not in results:
+        return False, f"限速 {rate_kbps}KB/s 未验证通过 [{detail}]"
+
     # 保存状态
     try:
         with open(_BW_STATE_FILE, "w") as f:
             json.dump({"rate_kbps": rate_kbps, "time": time.time()}, f)
     except: pass
-    
-    detail = " | ".join(results)
+
     return True, f"限速 {rate_kbps}KB/s 已生效 [{detail}]"
 
 def clear_bandwidth_limit():
@@ -894,7 +1018,7 @@ def get_dns_status():
 
 # ============ DNS 兜底断网 ============
 
-_DNS_BACKUP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_dns_backup.json")
+_DNS_BACKUP_FILE = os.path.join(AGENT_DIR, "_dns_backup.json")
 
 def _save_dns_backup():
     """保存当前 DNS 配置到文件 (断网前调用)
@@ -1103,29 +1227,106 @@ def _cleanup_old_exe():
             except:
                 pass
 
+def _is_recovery_exe(path):
+    """识别更新残留/回收态 exe, 避免继续把它当作正式安装目标。"""
+    name = os.path.basename(path).lower()
+    return (name.startswith("_trash_")
+            or name.startswith("campusnetagent_old_")
+            or name in ("campusnetagent_old.exe", "campusnetagent_new.exe"))
+
+def _is_unstable_exe_path(path):
+    try:
+        abs_path = os.path.abspath(path)
+        parent = os.path.dirname(abs_path)
+        drive, _ = os.path.splitdrive(abs_path)
+        root = (drive + os.sep) if drive else os.path.abspath(os.sep)
+        import tempfile
+        temp_dir = os.path.normcase(os.path.abspath(tempfile.gettempdir()))
+        return (_is_recovery_exe(path)
+                or _same_path(parent, root)
+                or os.path.normcase(abs_path).startswith(temp_dir + os.sep))
+    except:
+        return _is_recovery_exe(path)
+
+def _get_update_target_exe():
+    if not getattr(sys, 'frozen', False):
+        return AGENT_EXE
+    stable_exe = _get_stable_agent_exe()
+    if _path_root_exists(stable_exe):
+        return stable_exe
+    return AGENT_EXE
+
+def _ps_quote(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+def _launch_deferred_update(new_exe, target_exe):
+    """启动外部 PowerShell 更新器, 等当前进程退出后替换 exe。"""
+    import subprocess, tempfile
+    script_path = os.path.join(tempfile.gettempdir(), f"_campus_agent_update_{os.getpid()}.ps1")
+    start_args = ", ".join(_ps_quote(a) for a in sys.argv[1:])
+    lines = [
+        "$ErrorActionPreference = 'Continue'",
+        f"$pidToWait = {os.getpid()}",
+        f"$newExe = {_ps_quote(new_exe)}",
+        f"$targetExe = {_ps_quote(target_exe)}",
+        f"$startArgs = @({start_args})",
+        "try { Wait-Process -Id $pidToWait -Timeout 45 -ErrorAction SilentlyContinue } catch {}",
+        "$targetDir = Split-Path -Parent $targetExe",
+        "if ($targetDir -and -not (Test-Path -LiteralPath $targetDir)) { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }",
+        "$oldExe = Join-Path $targetDir (\"CampusNetAgent_old_{0}.exe\" -f [DateTimeOffset]::Now.ToUnixTimeSeconds())",
+        "if (Test-Path -LiteralPath $targetExe) {",
+        "  attrib -R -H -S $targetExe 2>$null",
+        "  try { Move-Item -LiteralPath $targetExe -Destination $oldExe -Force -ErrorAction Stop } catch {}",
+        "}",
+        "Copy-Item -LiteralPath $newExe -Destination $targetExe -Force -ErrorAction Stop",
+        "Remove-Item -LiteralPath $newExe -Force -ErrorAction SilentlyContinue",
+        "Start-Process -FilePath $targetExe -ArgumentList $startArgs -WorkingDirectory $targetDir -WindowStyle Hidden",
+        "if (Test-Path -LiteralPath $oldExe) { Remove-Item -LiteralPath $oldExe -Force -ErrorAction SilentlyContinue }",
+        "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue",
+    ]
+    with open(script_path, "w", encoding="utf-8-sig") as f:
+        f.write("\n".join(lines))
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    work_dir = os.path.dirname(target_exe)
+    if not work_dir or not os.path.isdir(work_dir):
+        work_dir = tempfile.gettempdir()
+    subprocess.Popen(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path],
+        creationflags=flags,
+        close_fds=True,
+        cwd=work_dir
+    )
+    return script_path
+
 def self_update(download_url, target_version="", on_step=None):
-    """静默自更新: 下载→重命名→替换→重启, 全过程无弹窗
+    """静默自更新: 下载→当前进程退出后替换→重启, 全过程无弹窗
     
     on_step: 可选回调 on_step(step, msg, status) 用于汇报进度
     """
-    import subprocess, shutil
+    import shutil
     _S = on_step or (lambda s, m, st="running": None)
     
-    exe_name = os.path.basename(AGENT_EXE)
-    # 优先写入 AGENT_DIR, 写不了则回退到系统 TEMP 目录
+    target_exe = _get_update_target_exe()
+    exe_name = os.path.basename(target_exe)
+    target_dir = os.path.dirname(target_exe) or AGENT_DIR
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+    except:
+        pass
+
+    # 优先写入目标目录, 写不了则回退到系统 TEMP 目录
     import tempfile
-    _work_dir = AGENT_DIR
+    _work_dir = target_dir
     _test_file = os.path.join(_work_dir, "_write_test")
     try:
         with open(_test_file, "w") as f: f.write("ok")
         os.remove(_test_file)
     except:
         _work_dir = tempfile.gettempdir()
-    new_exe = os.path.join(_work_dir, "CampusNetAgent_new.exe")
-    old_exe = os.path.join(_work_dir, "CampusNetAgent_old.exe")
+    new_exe = os.path.join(_work_dir, f"CampusNetAgent_new_{os.getpid()}.exe")
     
     # 1. 下载新版本
-    _S(3, f"开始下载: {download_url[:60]}... (工作目录: {_work_dir})")
+    _S(3, f"开始下载: {download_url[:60]}... (目标: {target_exe})")
     try:
         req = urllib.request.Request(download_url)
         req.add_header("User-Agent", "CampusNetAgent-Updater")
@@ -1142,72 +1343,73 @@ def self_update(download_url, target_version="", on_step=None):
         _S(3, f"下载失败: {e}", "error")
         return False, f"下载失败: {e}"
     
-    # 2. 清理旧的old文件
-    _S(4, "清理旧版本备份文件...")
-    if os.path.exists(old_exe):
-        for attempt in range(3):
-            try:
-                os.remove(old_exe)
-                break
-            except PermissionError:
-                try:
-                    trash = os.path.join(AGENT_DIR, f"_trash_{int(time.time())}.exe")
-                    os.rename(old_exe, trash)
-                    break
-                except:
-                    time.sleep(0.5)
-            except:
-                break
-    _S(4, "旧文件清理完成", "ok")
-    
-    # 3. 重命名当前 exe → old
+    # 2. 打包后的 Windows exe 不能可靠地在本进程内替换自己, 交给外部更新器。
+    if getattr(sys, 'frozen', False) and platform.system() == "Windows":
+        _S(4, "创建延迟更新脚本...")
+        try:
+            script_path = _launch_deferred_update(new_exe, target_exe)
+            _S(5, f"更新脚本已启动: {os.path.basename(script_path)}", "ok")
+            _S(6, f"旧进程退出后替换为: {exe_name}", "ok")
+            _S(7, "新版本将自动启动", "ok")
+            msg = f"更新已安排: v{AGENT_VERSION}→v{target_version or '?'}"
+            return True, msg
+        except Exception as e:
+            _S(5, f"创建更新脚本失败: {e}", "error")
+            return False, f"创建更新脚本失败: {e}"
+
+    # 3. 开发模式/非 Windows: 不替换当前进程, 只保存下载结果。
     if getattr(sys, 'frozen', False):
-        _S(5, f"重命名当前 exe → {os.path.basename(old_exe)}...")
         try:
-            os.rename(AGENT_EXE, old_exe)
-        except OSError:
-            old_exe = os.path.join(AGENT_DIR, f"CampusNetAgent_old_{int(time.time())}.exe")
-            try:
-                os.rename(AGENT_EXE, old_exe)
-            except Exception as e:
-                _S(5, f"重命名失败: {e}", "error")
-                return False, f"重命名当前exe失败: {e}"
-        _S(5, f"当前exe已重命名为 {os.path.basename(old_exe)}", "ok")
-        
-        # 4. 重命名新 exe → 原名
-        _S(6, f"新版本就位: {exe_name}...")
-        try:
-            os.rename(new_exe, AGENT_EXE)
+            shutil.copy2(new_exe, target_exe)
+            try: os.remove(new_exe)
+            except: pass
             _S(6, f"新版本已就位: {exe_name}", "ok")
+            return True, f"更新成功: v{AGENT_VERSION}→v{target_version or '?'}"
         except Exception as e:
-            try:
-                os.rename(old_exe, AGENT_EXE)
-            except:
-                pass
-            _S(6, f"替换失败(已回滚): {e}", "error")
+            _S(6, f"替换失败: {e}", "error")
             return False, f"替换exe失败: {e}"
-        
-        # 5. 启动新进程
-        _S(7, "启动新版本进程...")
-        try:
-            cmd_args = [AGENT_EXE] + sys.argv[1:]
-            subprocess.Popen(
-                cmd_args,
-                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
-                close_fds=True,
-                cwd=AGENT_DIR
-            )
-            _S(7, "新版本进程已启动", "ok")
-        except Exception as e:
-            _S(7, f"启动失败: {e}", "error")
-            return False, f"启动新版本失败: {e}"
-        
-        msg = f"更新成功: v{AGENT_VERSION}→v{target_version or '?'}"
-        return True, msg
-    else:
-        os.rename(new_exe, os.path.join(AGENT_DIR, f"CampusNetAgent_v{target_version}.exe"))
-        _S(5, "开发模式: 新版本已下载, 不自动替换", "ok")
-        return True, f"开发模式: 新版本已下载, 不自动替换"
+
+    saved = os.path.join(AGENT_DIR, f"CampusNetAgent_v{target_version or int(time.time())}.exe")
+    os.rename(new_exe, saved)
+    _S(5, "开发模式: 新版本已下载, 不自动替换", "ok")
+    return True, f"开发模式: 新版本已下载, 不自动替换: {saved}"
+
+def _get_watchdog_target_exe():
+    if getattr(sys, 'frozen', False):
+        return _prepare_stable_agent_copy()
+    return AGENT_SCRIPT
+
+def _get_watchdog_paths():
+    target_exe = _get_watchdog_target_exe()
+    base_dir = os.path.dirname(target_exe) or AGENT_DIR
+    return target_exe, os.path.join(base_dir, "_watchdog.vbs"), os.path.join(base_dir, "_watchdog.pid")
+
+def _watchdog_running(watchdog_vbs):
+    if platform.system() != "Windows":
+        return False, ""
+    needle = os.path.normcase(os.path.abspath(watchdog_vbs)).lower()
+    ps = (
+        f"$needle = {_ps_quote(needle)}; "
+        "Get-CimInstance Win32_Process -Filter \"Name='wscript.exe' OR Name='cscript.exe'\" -EA SilentlyContinue | "
+        "Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains($needle) } | "
+        "ForEach-Object { \"PID=$($_.ProcessId)\" }"
+    )
+    rc, out, _ = _ps_run(ps)
+    return rc == 0 and bool(out.strip()), out.strip()
+
+def _stop_own_watchdogs(keep_watchdog=None):
+    if platform.system() != "Windows":
+        return ""
+    keep = os.path.normcase(os.path.abspath(keep_watchdog)).lower() if keep_watchdog else ""
+    ps = (
+        f"$keep = {_ps_quote(keep)}; "
+        "Get-CimInstance Win32_Process -Filter \"Name='wscript.exe' OR Name='cscript.exe'\" -EA SilentlyContinue | "
+        "Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains('_watchdog.vbs') "
+        " -and ([string]::IsNullOrEmpty($keep) -or -not $_.CommandLine.ToLower().Contains($keep)) } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue; \"PID=$($_.ProcessId)\" }"
+    )
+    rc, out, _ = _ps_run(ps)
+    return out.strip() if rc == 0 else ""
 
 def _start_watchdog():
     """启动看门狗: 创建一个监控脚本, 主进程被杀后自动重启
@@ -1217,10 +1419,23 @@ def _start_watchdog():
     if platform.system() != "Windows":
         return
     import subprocess
-    watchdog_vbs = os.path.join(AGENT_DIR, "_watchdog.vbs")
+    target_exe, watchdog_vbs, pid_file = _get_watchdog_paths()
+    target_dir = os.path.dirname(target_exe) or AGENT_DIR
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+    except:
+        pass
     _unprotect_file(watchdog_vbs)
+    stopped = _stop_own_watchdogs(watchdog_vbs)
+    if stopped:
+        _autostart_log(f"已清理旧看门狗: {stopped}")
+
+    running, procs = _watchdog_running(watchdog_vbs)
+    if running:
+        _autostart_log(f"看门狗已在运行 ({procs}), 跳过")
+        return
+
     # 通过PID锁文件检查已有看门狗是否存活
-    pid_file = os.path.join(AGENT_DIR, "_watchdog.pid")
     existing_pid = None
     if os.path.exists(pid_file):
         try:
@@ -1231,26 +1446,39 @@ def _start_watchdog():
                              capture_output=True, timeout=5,
                              creationflags=subprocess.CREATE_NO_WINDOW)
             out = r.stdout.decode('gbk', errors='ignore')
-            if "wscript.exe" in out.lower():
+            running, procs = _watchdog_running(watchdog_vbs)
+            if "wscript.exe" in out.lower() and running:
                 _autostart_log(f"看门狗已在运行 (PID {existing_pid}), 跳过")
                 return
         except: pass
     
     if getattr(sys, 'frozen', False):
-        # 打包后: 监控 exe 进程名, 每30秒检查
-        exe_name = os.path.basename(AGENT_EXE)
+        # 打包后: 监控稳定安装路径中的正式 exe, 每30秒检查
+        exe_name = os.path.basename(target_exe)
         vbs_code = f'''On Error Resume Next
 Set ws = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+agentExe = "{target_exe}"
 WScript.Sleep 10000
 Do While True
+    alive = False
     Set objWMI = GetObject("winmgmts:")
     If Err.Number <> 0 Then
         Err.Clear
         WScript.Sleep 30000
     Else
         Set procs = objWMI.ExecQuery("SELECT * FROM Win32_Process WHERE Name = '{exe_name}'")
-        If Err.Number = 0 And procs.Count = 0 Then
-            ws.Run """{AGENT_EXE}""", 0, False
+        If Err.Number = 0 Then
+            For Each p In procs
+                pExe = LCase(p.ExecutablePath & "")
+                pCmd = LCase(p.CommandLine & "")
+                If pExe = LCase(agentExe) Or InStr(pCmd, LCase(agentExe)) > 0 Then
+                    alive = True
+                End If
+            Next
+        End If
+        If Not alive And fso.FileExists(agentExe) Then
+            ws.Run """" & agentExe & """", 0, False
         End If
         Err.Clear
         WScript.Sleep 30000
@@ -1262,7 +1490,7 @@ Loop
         python_exe = sys.executable
         vbs_code = f'''Set ws = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
-agentScript = "{AGENT_SCRIPT}"
+agentScript = "{target_exe}"
 pythonExe = "{python_exe}"
 WScript.Sleep 10000
 Do While True
@@ -1285,7 +1513,8 @@ Loop
     try:
         p = subprocess.Popen(["wscript.exe", watchdog_vbs],
                         creationflags=DETACHED | CREATE_NEW_PG,
-                        close_fds=True)
+                        close_fds=True,
+                        cwd=target_dir)
         # 写入PID锁文件, 供下次启动去重
         try:
             _unprotect_file(pid_file)
@@ -1915,10 +2144,12 @@ def run_self_test(agent, S):
 
     # ===== Phase 3: 校园网账户 =====
     # Step 9: Portal 连通性
+    portal_ok = False
     try:
         t0 = time.time()
         urllib.request.urlopen(f"http://{agent.net.portal_ip}/", timeout=5)
         latency = int((time.time() - t0) * 1000)
+        portal_ok = True
         OK(9, f"Portal连通 ({agent.net.portal_ip}) 延迟: {latency}ms")
     except Exception as e:
         FAIL(9, f"Portal不可达 ({agent.net.portal_ip}): {e}")
@@ -1936,23 +2167,26 @@ def run_self_test(agent, S):
         FAIL(10, f"认证检测异常: {e}")
 
     # Step 11: Portal API 测试
-    try:
-        import http.cookiejar
-        jar = http.cookiejar.CookieJar()
-        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-        opener.open(f"http://{agent.net.portal_ip}/", timeout=5).read()
-        cookies = list(jar)
-        info_url = f"http://{agent.net.portal_ip}/eportal/InterFace.do?method=getOnlineUserInfo"
-        req = urllib.request.Request(info_url, data=b"userIndex=", method="POST")
-        req.add_header("Content-Type", "application/x-www-form-urlencoded")
-        with opener.open(req, timeout=5) as resp:
-            text = resp.read().decode("utf-8", errors="ignore")
-            info = json.loads(text)
-        has_session = any('JSESSIONID' in c.name for c in cookies)
-        ui = info.get("userIndex", "")
-        OK(11, f"Portal API正常 | JSESSIONID: {'✓' if has_session else '✗'} | userIndex: {'✓' if ui else '✗'} | 字段: {list(info.keys())[:6]}")
-    except Exception as e:
-        FAIL(11, f"Portal API异常: {e}")
+    if not portal_ok:
+        INFO(11, "Portal不可达, 跳过API测试")
+    else:
+        try:
+            import http.cookiejar
+            jar = http.cookiejar.CookieJar()
+            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+            opener.open(f"http://{agent.net.portal_ip}/", timeout=5).read()
+            cookies = list(jar)
+            info_url = f"http://{agent.net.portal_ip}/eportal/InterFace.do?method=getOnlineUserInfo"
+            req = urllib.request.Request(info_url, data=b"userIndex=", method="POST")
+            req.add_header("Content-Type", "application/x-www-form-urlencoded")
+            with opener.open(req, timeout=5) as resp:
+                text = resp.read().decode("utf-8", errors="ignore")
+                info = json.loads(text)
+            has_session = any('JSESSIONID' in c.name for c in cookies)
+            ui = info.get("userIndex", "")
+            OK(11, f"Portal API正常 | JSESSIONID: {'✓' if has_session else '✗'} | userIndex: {'✓' if ui else '✗'} | 字段: {list(info.keys())[:6]}")
+        except Exception as e:
+            FAIL(11, f"Portal API异常: {e}")
 
     # ===== Phase 4: 限速功能诊断 =====
     # Step 12: PowerShell 环境
@@ -2033,7 +2267,9 @@ def run_self_test(agent, S):
             rc2, after_tcp, _ = _diag_ps('(netsh interface tcp show global) -match "Receive Window"')
             rc3, after_gpo, _ = _diag_ps(
                 f'Test-Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\{BANDWIDTH_POLICY_NAME}"')
-            all_clean = (not after_qos.strip()) and ('normal' in after_tcp.lower() or 'Normal' in after_tcp) and ('False' in after_gpo)
+            tcp_text = (after_tcp or "").strip().lower()
+            tcp_clean = (not tcp_text) or ("normal" in tcp_text) or ("正常" in tcp_text)
+            all_clean = (not after_qos.strip()) and tcp_clean and ('False' in after_gpo)
             if all_clean:
                 OK(16, f"限速清除验证: QoS策略=已删 | TCP窗口=正常 | GPO=已删")
             else:
@@ -2056,7 +2292,7 @@ def run_self_test(agent, S):
             else:
                 FAIL(17, f"下线API异常: userIndex无效, 响应: {text[:80]}")
         else:
-            FAIL(17, "无userIndex, 无法测试下线API (设备可能未认证)")
+            INFO(17, "无userIndex, 跳过下线API测试 (设备可能未认证)")
     except Exception as e:
         FAIL(17, f"下线API测试异常: {e}")
 
@@ -2074,33 +2310,36 @@ def run_self_test(agent, S):
         FAIL(18, f"用户详情获取异常: {e}")
 
     # Step 19: Cookie/Session 机制验证
-    try:
-        import http.cookiejar
-        jar = http.cookiejar.CookieJar()
-        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-        opener.open(f"http://{agent.net.portal_ip}/", timeout=5).read()
-        info_url = f"http://{agent.net.portal_ip}/eportal/InterFace.do?method=getOnlineUserInfo"
-        req = urllib.request.Request(info_url, data=b"userIndex=", method="POST")
-        req.add_header("Content-Type", "application/x-www-form-urlencoded")
-        with opener.open(req, timeout=5) as resp:
-            text1 = resp.read().decode("utf-8", errors="ignore")
-        info1 = json.loads(text1)
-        # 第二次不带cookie
-        req2 = urllib.request.Request(info_url, data=b"userIndex=", method="POST")
-        req2.add_header("Content-Type", "application/x-www-form-urlencoded")
-        with urllib.request.urlopen(req2, timeout=5) as resp2:
-            text2 = resp2.read().decode("utf-8", errors="ignore")
-        info2 = json.loads(text2)
-        idx1 = info1.get("userIndex", "")
-        idx2 = info2.get("userIndex", "")
-        if idx1 and not idx2:
-            OK(19, "Cookie机制正常: 有Cookie→有userIndex, 无Cookie→无userIndex")
-        elif idx1 and idx2:
-            INFO(19, f"Cookie机制: 两种方式都返回了userIndex (portal可能不依赖session)")
-        else:
-            FAIL(19, f"Cookie机制异常: 有Cookie→{bool(idx1)}, 无Cookie→{bool(idx2)}")
-    except Exception as e:
-        FAIL(19, f"Cookie机制测试异常: {e}")
+    if not portal_ok:
+        INFO(19, "Portal不可达, 跳过Cookie机制测试")
+    else:
+        try:
+            import http.cookiejar
+            jar = http.cookiejar.CookieJar()
+            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+            opener.open(f"http://{agent.net.portal_ip}/", timeout=5).read()
+            info_url = f"http://{agent.net.portal_ip}/eportal/InterFace.do?method=getOnlineUserInfo"
+            req = urllib.request.Request(info_url, data=b"userIndex=", method="POST")
+            req.add_header("Content-Type", "application/x-www-form-urlencoded")
+            with opener.open(req, timeout=5) as resp:
+                text1 = resp.read().decode("utf-8", errors="ignore")
+            info1 = json.loads(text1)
+            # 第二次不带cookie
+            req2 = urllib.request.Request(info_url, data=b"userIndex=", method="POST")
+            req2.add_header("Content-Type", "application/x-www-form-urlencoded")
+            with urllib.request.urlopen(req2, timeout=5) as resp2:
+                text2 = resp2.read().decode("utf-8", errors="ignore")
+            info2 = json.loads(text2)
+            idx1 = info1.get("userIndex", "")
+            idx2 = info2.get("userIndex", "")
+            if idx1 and not idx2:
+                OK(19, "Cookie机制正常: 有Cookie→有userIndex, 无Cookie→无userIndex")
+            elif idx1 and idx2:
+                INFO(19, f"Cookie机制: 两种方式都返回了userIndex (portal可能不依赖session)")
+            else:
+                FAIL(19, f"Cookie机制异常: 有Cookie→{bool(idx1)}, 无Cookie→{bool(idx2)}")
+        except Exception as e:
+            FAIL(19, f"Cookie机制测试异常: {e}")
 
     # ===== Phase 6: DNS功能 =====
     # Step 20: DNS 篡改测试
@@ -2169,12 +2408,16 @@ def run_self_test(agent, S):
         try:
             import ctypes
             attrs = ctypes.windll.kernel32.GetFileAttributesW(AGENT_EXE)
-            hidden = bool(attrs & 0x02) if attrs != -1 else False
-            system = bool(attrs & 0x04) if attrs != -1 else False
-            if hidden and system:
-                OK(23, f"文件保护已启用: hidden={hidden} system={system}")
+            if attrs == -1:
+                FAIL(23, f"文件保护检测失败: exe不存在 attrs={attrs}")
             else:
-                FAIL(23, f"文件保护不完整: hidden={hidden} system={system} attrs={attrs}")
+                readonly = bool(attrs & 0x01)
+                hidden = bool(attrs & 0x02)
+                system = bool(attrs & 0x04)
+                if readonly:
+                    OK(23, f"文件保护已启用: exe只读={readonly} hidden={hidden} system={system}")
+                else:
+                    FAIL(23, f"文件保护不完整: exe只读={readonly} attrs={attrs}")
         except Exception as e:
             FAIL(23, f"文件保护检测异常: {e}")
     else:
@@ -2183,10 +2426,13 @@ def run_self_test(agent, S):
     # Step 24: Defender 排除状态
     if is_win:
         try:
-            rc, excl, _ = _diag_ps(
+            rc, excl, err = _diag_ps(
                 "(Get-MpPreference -EA SilentlyContinue).ExclusionPath -join '; '")
             agent_dir = os.path.dirname(AGENT_EXE)
-            if agent_dir.lower() in excl.lower():
+            diag_text = f"{excl} {err}"
+            if rc != 0 and "administrator" in diag_text.lower():
+                INFO(24, "当前非管理员, 无法读取Defender排除列表, 跳过验证")
+            elif agent_dir.lower() in excl.lower():
                 OK(24, f"Defender排除已设置: {excl[:80]}")
             else:
                 FAIL(24, f"Defender排除未包含Agent目录! 排除列表: {excl[:80]}")
@@ -2198,13 +2444,10 @@ def run_self_test(agent, S):
     # Step 25: 看门狗状态
     if is_win:
         try:
-            watchdog_vbs = os.path.join(AGENT_DIR, "_watchdog.vbs")
+            _, watchdog_vbs, _ = _get_watchdog_paths()
             watchdog_exists = os.path.exists(watchdog_vbs)
-            # 检查是否有 wscript 进程在跑
-            rc, procs, _ = _diag_ps(
-                "Get-Process wscript -EA SilentlyContinue | "
-                "Select-Object Id,StartTime | ForEach-Object { \"PID=$($_.Id)\" }")
-            if watchdog_exists and procs:
+            running, procs = _watchdog_running(watchdog_vbs)
+            if watchdog_exists and running:
                 OK(25, f"看门狗运行中: {procs.strip()[:60]}")
             elif watchdog_exists:
                 FAIL(25, f"看门狗脚本存在但进程未运行")
@@ -2787,6 +3030,9 @@ if __name__ == "__main__":
     parser.add_argument("--no-protect", action="store_true", help="跳过文件防护")
     parser.add_argument("--no-watchdog", action="store_true", help="禁用看门狗")
     args = parser.parse_args()
+
+    if _ensure_stable_runtime():
+        os._exit(0)
 
     # 首次运行: 静默自动配置 (开机自启 + 文件防护 + Defender白名单)
     cfg = load_config()
