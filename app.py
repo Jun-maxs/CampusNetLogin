@@ -4,15 +4,71 @@
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk
 import threading
 import time
 import sys
 import os
 from datetime import datetime
+import ctypes
+import urllib.request
+import urllib.error
+import json
 
 from eportal_api import EPortalAPI, LoginResult, NetworkStatus
 from config_manager import ConfigManager
+
+# 确认服务器配置
+CONFIRM_SERVER = "http://127.0.0.1:9999"
+SERVER_TIMEOUT = 1  # 降低超时时间
+SERVER_RETRY = 2    # 重试次数
+
+
+def check_server_permission(operation: str) -> bool:
+    """向服务器请求操作权限（带重试）"""
+    for attempt in range(SERVER_RETRY):
+        try:
+            data = json.dumps({"operation": operation}).encode('utf-8')
+            req = urllib.request.Request(
+                f"{CONFIRM_SERVER}/confirm",
+                data=data,
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req, timeout=SERVER_TIMEOUT) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                return result.get("allowed", False)
+        except Exception:
+            if attempt < SERVER_RETRY - 1:
+                time.sleep(0.1)
+            continue
+    # 服务器无响应，默认允许（降级策略）
+    return True
+
+
+def is_admin():
+    """检查是否以管理员权限运行"""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+
+def run_as_admin():
+    """请求管理员权限重启程序"""
+    try:
+        if sys.argv[0].endswith('.py'):
+            # Python 脚本
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, f'"{sys.argv[0]}"', None, 1
+            )
+        else:
+            # 打包后的 exe
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, " ".join(sys.argv), None, 1
+            )
+        sys.exit(0)
+    except Exception:
+        sys.exit(1)
 
 
 class StatusIndicator(tk.Canvas):
@@ -441,12 +497,16 @@ class CampusNetApp:
         self.log_text.configure(state="disabled")
 
     def _save_credentials(self):
+        if not check_server_permission("save_credentials"):
+            self._log("服务器拒绝：保存账号", "warn")
+            return
+
         username = self.username_var.get().strip()
         password = self.password_var.get().strip()
         service = self.service_var.get().strip()
 
         if not username or not password:
-            messagebox.showwarning("提示", "请输入用户名和密码")
+            self._log("请输入用户名和密码", "warn")
             return
 
         self.config.username = username
@@ -508,12 +568,16 @@ class CampusNetApp:
 
     def _login_async(self, force_relogin=False):
         """异步登录"""
+        if not check_server_permission("login"):
+            self._log("服务器拒绝：登录操作", "warn")
+            return
+
         username = self.username_var.get().strip()
         password = self.password_var.get().strip()
         service = self.service_var.get().strip()
 
         if not username or not password:
-            messagebox.showwarning("提示", "请先输入用户名和密码")
+            self._log("请先输入用户名和密码", "warn")
             return
 
         self.login_btn.config(state="disabled", text="⏳ 登录中...")
@@ -576,6 +640,10 @@ class CampusNetApp:
 
     def _logout_async(self):
         """异步注销"""
+        if not check_server_permission("logout"):
+            self._log("服务器拒绝：注销操作", "warn")
+            return
+
         if not self.current_user_index:
             self._log("无有效会话可注销", "warn")
             return
@@ -681,11 +749,12 @@ class CampusNetApp:
 
     def _go_offline_async(self):
         """本机下线 (注销网络认证)"""
+        if not check_server_permission("offline"):
+            self._log("服务器拒绝：下线操作", "warn")
+            return
+
         if not self.current_user_index:
             self._log("无有效会话，尝试强制下线...", "warn")
-        if not messagebox.askyesno("确认下线",
-                "确定要让本机下线吗?\n网络连接将断开，需重新登录才能上网。"):
-            return
 
         self.offline_btn.config(state="disabled", text="⏳ 下线中...")
         self._log("正在执行下线...")
@@ -817,12 +886,12 @@ class CampusNetApp:
 
     def _cancel_mac_async(self):
         """关闭本机无感认证"""
-        if not self.current_user_index:
-            self._log("请先登录", "warn")
+        if not check_server_permission("cancel_mac"):
+            self._log("服务器拒绝：关闭无感认证", "warn")
             return
 
-        if not messagebox.askyesno("确认",
-                "确定要关闭本机无感认证吗?\n关闭后需手动登录才能上网。"):
+        if not self.current_user_index:
+            self._log("请先登录", "warn")
             return
 
         self.cancel_mac_btn.config(state="disabled")
@@ -846,8 +915,8 @@ class CampusNetApp:
 
     def _force_offline_device_async(self, user_id: str, user_mac: str):
         """强制指定设备下线"""
-        if not messagebox.askyesno("确认下线",
-                f"确定要强制设备 {user_mac} 下线?\n将取消MAC绑定并尝试踢出在线连接。"):
+        if not check_server_permission("force_offline_device"):
+            self._log("服务器拒绝：强制设备下线", "warn")
             return
 
         self._log(f"正在强制下线设备 {user_mac}...")
@@ -874,8 +943,8 @@ class CampusNetApp:
 
     def _kick_device_async(self, user_id: str, user_mac: str):
         """取消指定设备的无感认证绑定"""
-        if not messagebox.askyesno("确认",
-                f"确定取消设备 {user_mac} 的无感认证?\n该设备将需要重新手动登录。"):
+        if not check_server_permission("kick_device"):
+            self._log("服务器拒绝：取消设备绑定", "warn")
             return
 
         self._log(f"正在取消设备 {user_mac} 的绑定...")
@@ -899,12 +968,12 @@ class CampusNetApp:
 
     def _kick_all_devices_async(self):
         """取消所有设备的无感认证绑定"""
-        if not self.current_user_index:
-            self._log("请先登录", "warn")
+        if not check_server_permission("kick_all_devices"):
+            self._log("服务器拒绝：全部取消绑定", "warn")
             return
 
-        if not messagebox.askyesno("危险操作",
-                "确定取消所有设备的无感认证绑定?\n\n所有设备(包括本机)都将需要重新手动登录。\n这是不可逆操作!"):
+        if not self.current_user_index:
+            self._log("请先登录", "warn")
             return
 
         self.kick_all_btn.config(state="disabled")
@@ -947,9 +1016,65 @@ class CampusNetApp:
         self.root.mainloop()
 
 
+def is_task_installed():
+    """检查计划任务是否已安装"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['schtasks', '/query', '/tn', 'CampusNetLogin'],
+            capture_output=True,
+            text=True
+        )
+        return result.returncode == 0
+    except:
+        return False
+
+
+def install_task():
+    """安装计划任务"""
+    import subprocess
+    script_path = os.path.abspath(sys.argv[0])
+
+    xml = f'''<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal><RunLevel>HighestAvailable</RunLevel></Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+  </Settings>
+  <Actions>
+    <Exec><Command>"{script_path}"</Command></Exec>
+  </Actions>
+</Task>'''
+
+    xml_file = os.path.join(os.path.dirname(script_path), 'task.xml')
+    with open(xml_file, 'w', encoding='utf-16') as f:
+        f.write(xml)
+
+    subprocess.run(['schtasks', '/create', '/tn', 'CampusNetLogin', '/xml', xml_file, '/f'])
+    os.remove(xml_file)
+
+
 def main():
-    app = CampusNetApp()
-    app.run()
+    try:
+        # 首次运行：安装计划任务（需要 UAC）
+        if not is_task_installed():
+            if not is_admin():
+                run_as_admin()
+                return
+            install_task()
+
+        app = CampusNetApp()
+        app.run()
+    except Exception:
+        # 静默退出，不显示任何错误
+        sys.exit(1)
 
 
 if __name__ == "__main__":
